@@ -44,6 +44,7 @@ COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 # Copiar código backend
 COPY backend/main.py .
 COPY backend/workflow_krita.py .
+COPY backend/civitai.py .
 
 # Directorio de datos persistente (SQLite)
 RUN mkdir -p /app/data

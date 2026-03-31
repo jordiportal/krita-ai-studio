@@ -12,6 +12,7 @@ import {
   ComfyConfig,
   ConnectionTestResult,
   GalleryResponse,
+  CacheResponse,
 } from './types';
 
 @Injectable({
@@ -77,5 +78,33 @@ export class GenerationService {
 
   deleteGalleryImage(imgId: string): Observable<any> {
     return this.http.delete(`${this.apiUrl}/gallery/${imgId}`);
+  }
+
+  searchCivitai(params: Record<string, string | number | boolean>): Observable<any> {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== '' && v !== undefined) qs.set(k, String(v));
+    }
+    return this.http.get(`${this.apiUrl}/civitai/search?${qs.toString()}`);
+  }
+
+  getCivitaiModel(modelId: number): Observable<any> {
+    return this.http.get(`${this.apiUrl}/civitai/models/${modelId}`);
+  }
+
+  downloadModel(data: any): Observable<any> {
+    return this.http.post(`${this.apiUrl}/civitai/download`, data);
+  }
+
+  getDownloads(): Observable<any> {
+    return this.http.get(`${this.apiUrl}/civitai/downloads`);
+  }
+
+  getCache(): Observable<CacheResponse> {
+    return this.http.get<CacheResponse>(`${this.apiUrl}/cache`);
+  }
+
+  deleteCacheItem(id: string): Observable<any> {
+    return this.http.delete(`${this.apiUrl}/cache/${id}`);
   }
 }

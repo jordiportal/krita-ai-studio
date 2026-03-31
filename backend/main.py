@@ -3,16 +3,18 @@ Krita AI Studio Backend - FastAPI
 Replica EXACTAMENTE el comportamiento de krita-ai-diffusion
 Usa ETN_SaveImageCache (no PreviewImage) + /api/etn/image/{id}
 SQLite para persistir configuración del usuario, conexión ComfyUI y galería
-Basic Auth protege la app y se reenvía a ComfyUI
+JWT auth con pantalla de login
 """
 
 import os
 import base64
+import hashlib
 import random
 import secrets
 import sqlite3
 import time
 import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
@@ -24,12 +26,15 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 import httpx
+import jwt
 
 from workflow_krita import create_txt2img_workflow_krita
+from civitai import router as civitai_router, configure as configure_civitai
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DB_PATH = DATA_DIR / "krita_ai.db"
 GALLERY_DIR = DATA_DIR / "gallery"
+MODELS_DIR = DATA_DIR / "models"
 
 
 # ─── SQLite helpers ───────────────────────────────────────────────────────────
@@ -50,6 +55,23 @@ def init_db():
         CREATE TABLE IF NOT EXISTS config (
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS model_cache (
+            id                  TEXT PRIMARY KEY,
+            civitai_model_id    INTEGER NOT NULL DEFAULT 0,
+            civitai_version_id  INTEGER NOT NULL DEFAULT 0,
+            name                TEXT NOT NULL DEFAULT '',
+            type                TEXT NOT NULL DEFAULT 'Checkpoint',
+            filename            TEXT NOT NULL DEFAULT '',
+            size_bytes          INTEGER NOT NULL DEFAULT 0,
+            downloaded_at       REAL NOT NULL DEFAULT 0,
+            status              TEXT NOT NULL DEFAULT 'downloading',
+            progress            REAL NOT NULL DEFAULT 0,
+            download_url        TEXT NOT NULL DEFAULT '',
+            metadata            TEXT NOT NULL DEFAULT '{}'
         )
     """)
 
@@ -90,6 +112,9 @@ def init_db():
         "comfyui_secure": os.getenv("COMFYUI_SECURE", "false"),
         "auth_user": "",
         "auth_pass": "",
+        "jwt_secret": "",
+        "civitai_api_key": "",
+        "civitai_nsfw_level": "31",
     }
     for k, v in config_defaults.items():
         conn.execute(
@@ -146,6 +171,55 @@ def get_comfyui_url() -> str:
 def get_auth_credentials() -> tuple[str, str]:
     cfg = get_comfyui_config()
     return cfg.get("auth_user", ""), cfg.get("auth_pass", "")
+
+
+def hash_password(password: str) -> str:
+    salt = os.urandom(16)
+    key = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 100000)
+    return salt.hex() + ":" + key.hex()
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    if ":" not in stored_hash:
+        if secrets.compare_digest(password, stored_hash):
+            new_hash = hash_password(password)
+            _update_table("config", {"auth_pass": new_hash})
+            return True
+        return False
+    try:
+        salt_hex, key_hex = stored_hash.split(":", 1)
+        salt = bytes.fromhex(salt_hex)
+        key = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 100000)
+        return secrets.compare_digest(key.hex(), key_hex)
+    except (ValueError, AttributeError):
+        return False
+
+
+def get_jwt_secret() -> str:
+    cfg = get_comfyui_config()
+    secret = cfg.get("jwt_secret", "")
+    if not secret:
+        secret = secrets.token_hex(32)
+        _update_table("config", {"jwt_secret": secret})
+    return secret
+
+
+def create_token(username: str) -> str:
+    secret = get_jwt_secret()
+    payload = {
+        "sub": username,
+        "exp": datetime.utcnow() + timedelta(days=30),
+        "iat": datetime.utcnow(),
+    }
+    return jwt.encode(payload, secret, algorithm="HS256")
+
+
+def verify_token(token: str) -> dict | None:
+    secret = get_jwt_secret()
+    try:
+        return jwt.decode(token, secret, algorithms=["HS256"])
+    except jwt.InvalidTokenError:
+        return None
 
 
 def save_gallery_image(
@@ -210,28 +284,38 @@ def delete_gallery_image(img_id: str) -> bool:
 _job_meta: Dict[str, Dict[str, Any]] = {}
 
 
-# ─── Basic Auth Middleware ────────────────────────────────────────────────────
+# ─── JWT Auth Middleware ──────────────────────────────────────────────────────
 
-class BasicAuthMiddleware(BaseHTTPMiddleware):
+_PUBLIC_API = {"/api/auth/status", "/api/auth/login", "/api/health"}
+
+
+class JWTAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        user, pw = get_auth_credentials()
-        if not user or not pw:
+        path = request.url.path.rstrip("/")
+
+        if not path.startswith("/api"):
             return await call_next(request)
 
+        if path in _PUBLIC_API:
+            return await call_next(request)
+
+        cfg = get_comfyui_config()
+        if not (cfg.get("auth_user") and cfg.get("auth_pass")):
+            return await call_next(request)
+
+        token = None
         auth_header = request.headers.get("authorization", "")
-        if auth_header.startswith("Basic "):
-            try:
-                decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
-                req_user, req_pass = decoded.split(":", 1)
-                if secrets.compare_digest(req_user, user) and secrets.compare_digest(req_pass, pw):
-                    return await call_next(request)
-            except Exception:
-                pass
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+        if not token:
+            token = request.query_params.get("token")
+
+        if token and verify_token(token):
+            return await call_next(request)
 
         return JSONResponse(
             status_code=401,
             content={"detail": "Authentication required"},
-            headers={"WWW-Authenticate": 'Basic realm="Krita AI Studio"'},
         )
 
 
@@ -276,6 +360,13 @@ class ConfigPayload(BaseModel):
     comfyui_secure: Optional[str] = None
     auth_user: Optional[str] = None
     auth_pass: Optional[str] = None
+    civitai_api_key: Optional[str] = None
+    civitai_nsfw_level: Optional[str] = None
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
 
 # ─── App ──────────────────────────────────────────────────────────────────────
@@ -283,24 +374,26 @@ class ConfigPayload(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    configure_civitai(DB_PATH, MODELS_DIR)
     url = get_comfyui_url()
     user, pw = get_auth_credentials()
-    print(f"Krita AI Studio Backend iniciado")
+    print(f"Krita AI Studio Backend v3.1 iniciado")
     print(f"ComfyUI URL: {url}")
-    print(f"Auth: {'enabled' if user and pw else 'disabled (open)'}")
+    print(f"Auth: {'JWT enabled' if user and pw else 'disabled (open)'}")
     print(f"Database: {DB_PATH}")
     print(f"Gallery: {GALLERY_DIR}")
+    print(f"Models cache: {MODELS_DIR}")
     yield
     print("Cerrando Krita AI Studio Backend")
 
 
 app = FastAPI(
     title="Krita AI Studio API",
-    version="2.4.0",
+    version="3.1.0",
     lifespan=lifespan,
 )
 
-app.add_middleware(BasicAuthMiddleware)
+app.add_middleware(JWTAuthMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -310,6 +403,51 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(civitai_router)
+
+
+# ─── Auth endpoints ──────────────────────────────────────────────────────────
+
+@app.get("/api/auth/status")
+async def auth_status(request: Request):
+    cfg = get_comfyui_config()
+    auth_enabled = bool(cfg.get("auth_user") and cfg.get("auth_pass"))
+
+    logged_in = False
+    if not auth_enabled:
+        logged_in = True
+    else:
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            if verify_token(token):
+                logged_in = True
+
+    return {
+        "auth_enabled": auth_enabled,
+        "logged_in": logged_in,
+        "username": cfg.get("auth_user", "") if logged_in and auth_enabled else None,
+    }
+
+
+@app.post("/api/auth/login")
+async def auth_login(payload: LoginRequest):
+    cfg = get_comfyui_config()
+    stored_user = cfg.get("auth_user", "")
+    stored_hash = cfg.get("auth_pass", "")
+
+    if not stored_user or not stored_hash:
+        raise HTTPException(status_code=400, detail="Auth not configured")
+
+    if not secrets.compare_digest(payload.username, stored_user):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    if not verify_password(payload.password, stored_hash):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    token = create_token(payload.username)
+    return {"token": token, "username": stored_user}
+
 
 # ─── Config endpoints (ComfyUI connection + auth) ────────────────────────────
 
@@ -317,27 +455,52 @@ app.add_middleware(
 async def api_get_config():
     cfg = get_comfyui_config()
     url = get_comfyui_url()
-    safe_cfg = {**cfg, "comfyui_url": url}
+    auth_enabled = bool(cfg.get("auth_user") and cfg.get("auth_pass"))
+    safe_cfg = {**cfg, "comfyui_url": url, "auth_enabled": auth_enabled}
     if safe_cfg.get("auth_pass"):
-        safe_cfg["auth_pass"] = "••••••••"
+        safe_cfg["auth_pass"] = "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"
+    safe_cfg.pop("jwt_secret", None)
     return safe_cfg
 
 
 @app.post("/api/config")
 async def api_save_config(payload: ConfigPayload):
+    old_cfg = get_comfyui_config()
+    was_auth_enabled = bool(old_cfg.get("auth_user") and old_cfg.get("auth_pass"))
+
     data: Dict[str, str] = {}
     for field, val in payload.model_dump(exclude_none=True).items():
-        if field == "auth_pass" and val == "••••••••":
-            continue
-        data[field] = str(val)
+        if field == "auth_pass":
+            if val == "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022":
+                continue
+            if val:
+                data[field] = hash_password(val)
+            else:
+                data[field] = ""
+        else:
+            data[field] = str(val)
     if data:
         update_comfyui_config(data)
+
     cfg = get_comfyui_config()
+    is_auth_enabled = bool(cfg.get("auth_user") and cfg.get("auth_pass"))
+    auth_activated = is_auth_enabled and not was_auth_enabled
+
     url = get_comfyui_url()
-    safe_cfg = {**cfg, "comfyui_url": url}
-    if safe_cfg.get("auth_pass"):
-        safe_cfg["auth_pass"] = "••••••••"
-    return safe_cfg
+    response: Dict[str, Any] = {
+        **cfg,
+        "comfyui_url": url,
+        "auth_enabled": is_auth_enabled,
+    }
+    if response.get("auth_pass"):
+        response["auth_pass"] = "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"
+    response.pop("jwt_secret", None)
+
+    if auth_activated:
+        response["token"] = create_token(cfg.get("auth_user", ""))
+        response["auth_activated"] = True
+
+    return response
 
 
 @app.post("/api/config/test")

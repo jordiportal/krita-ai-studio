@@ -67,6 +67,8 @@ export interface ComfyConfig {
   comfyui_url?: string;
   auth_user?: string;
   auth_pass?: string;
+  civitai_api_key?: string;
+  civitai_nsfw_level?: string;
 }
 
 export interface ConnectionTestResult {
@@ -90,4 +92,41 @@ export interface GalleryItem {
 export interface GalleryResponse {
   items: GalleryItem[];
   total: number;
+}
+
+export interface AuthStatus {
+  auth_enabled: boolean;
+  logged_in: boolean;
+  username?: string;
+}
+
+export interface LoginResponse {
+  token: string;
+  username: string;
+}
+
+export interface CachedModel {
+  id: string;
+  civitai_model_id: number;
+  civitai_version_id: number;
+  name: string;
+  type: string;
+  filename: string;
+  size_bytes: number;
+  downloaded_at: number;
+  status: string;
+  progress: number;
+  download_url: string;
+  metadata: string;
+  speed?: number;
+  downloaded?: number;
+}
+
+export interface CacheResponse {
+  items: CachedModel[];
+}
+
+export interface ModelTypeOption {
+  label: string;
+  value: string;
 }

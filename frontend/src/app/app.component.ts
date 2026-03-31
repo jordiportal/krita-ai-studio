@@ -1,20 +1,61 @@
-import { Component, OnInit, HostListener } from '@angular/core';
+import { Component, OnInit, OnDestroy, HostListener } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { HttpClientModule } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
+import { Subscription } from 'rxjs';
 import { GenerationService } from './generation.service';
+import { AuthService } from './auth.service';
 import {
   Model, GenerationRequest, Settings, ComfyConfig,
-  ConnectionTestResult, GalleryItem,
+  ConnectionTestResult, GalleryItem, CachedModel, ModelTypeOption,
 } from './types';
 
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [CommonModule, HttpClientModule, FormsModule],
-  providers: [GenerationService],
+  imports: [CommonModule, FormsModule],
   template: `
-    <div class="app-container" [class.has-bottom-nav]="true">
+    <!-- LOADING -->
+    <div class="login-container" *ngIf="appState === 'loading'">
+      <div class="login-card">
+        <div class="login-header">
+          <h1 class="login-title">Krita AI</h1>
+          <p class="login-subtitle">Studio</p>
+        </div>
+        <div class="login-loading"><span class="spinner login-spinner"></span></div>
+      </div>
+    </div>
+
+    <!-- LOGIN -->
+    <div class="login-container" *ngIf="appState === 'login'">
+      <div class="login-card">
+        <div class="login-header">
+          <h1 class="login-title">Krita AI</h1>
+          <p class="login-subtitle">Studio</p>
+        </div>
+        <form (ngSubmit)="handleLogin()">
+          <div class="input-group">
+            <label>Usuario</label>
+            <input class="input-field" type="text" [(ngModel)]="loginUsername"
+                   name="username" placeholder="Usuario" autocomplete="username">
+          </div>
+          <div class="input-group">
+            <label>Contrase&ntilde;a</label>
+            <input class="input-field" type="password" [(ngModel)]="loginPassword"
+                   name="password" placeholder="Contrase&ntilde;a" autocomplete="current-password">
+          </div>
+          <button type="submit" class="btn btn-primary"
+                  [disabled]="loggingIn || !loginUsername || !loginPassword">
+            <span *ngIf="loggingIn" class="spinner"></span>
+            {{ loggingIn ? 'Entrando...' : 'Entrar' }}
+          </button>
+        </form>
+        <p class="login-error" *ngIf="loginError">{{ loginError }}</p>
+      </div>
+      <p class="login-footer">Powered by ComfyUI</p>
+    </div>
+
+    <!-- APP -->
+    <div class="app-container" [class.has-bottom-nav]="true" *ngIf="appState === 'app'">
       <header class="header">
         <h1>Krita AI</h1>
         <div class="status" [class.online]="comfyOnline" [class.offline]="!comfyOnline">
@@ -222,8 +263,18 @@ import {
             {{ configSecure === 'true' ? 'https' : 'http' }}://{{ configHost || '...' }}:{{ configPort || '...' }}
           </div>
 
-          <h2 class="card-title" style="margin-top: 8px;">Autenticaci&oacute;n (Basic Auth)</h2>
-          <p class="auth-hint">Protege el acceso a esta app. D&eacute;jalo vac&iacute;o para acceso libre.</p>
+          <h2 class="card-title" style="margin-top: 8px;">Autenticaci&oacute;n</h2>
+
+          <div class="auth-status" [class.active]="isAuthEnabled" [class.inactive]="!isAuthEnabled">
+            <span>{{ isAuthEnabled ? '&#128274; Protegido' : '&#128275; Acceso libre' }}</span>
+          </div>
+
+          <p class="auth-hint" *ngIf="!isAuthEnabled">
+            Configura usuario y contrase&ntilde;a para proteger el acceso a la app.
+          </p>
+          <p class="auth-hint" *ngIf="isAuthEnabled">
+            Cambia tus credenciales o d&eacute;jalos vac&iacute;os para desactivar.
+          </p>
 
           <div class="settings-grid">
             <div class="input-group">
@@ -244,6 +295,81 @@ import {
                 [(ngModel)]="authPass"
                 placeholder="&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;"
                 autocomplete="new-password">
+            </div>
+          </div>
+
+          <div class="logout-section" *ngIf="isAuthEnabled">
+            <button class="btn btn-secondary" style="width: 100%;" (click)="handleLogout()">
+              Cerrar sesi&oacute;n
+            </button>
+          </div>
+
+          <h4 class="section-title" style="margin-top: 24px;">CivitAI</h4>
+          <div class="settings-grid">
+            <div class="input-group">
+              <label>API Key (opcional)</label>
+              <input
+                class="input-field"
+                type="password"
+                [(ngModel)]="civitaiApiKey"
+                placeholder="Sin API key"
+                autocomplete="off">
+              <p class="auth-hint" style="margin-top: 4px;">Necesaria para descargas grandes o modelos privados.</p>
+            </div>
+            <div class="input-group">
+              <label>Moderaci&oacute;n de contenido</label>
+              <div class="nsfw-toggles">
+                <div class="nsfw-toggle-row">
+                  <div class="nsfw-toggle-info">
+                    <span class="nsfw-toggle-label">PG</span>
+                    <span class="nsfw-toggle-desc">Safe for work</span>
+                  </div>
+                  <label class="toggle-switch">
+                    <input type="checkbox" [checked]="hasNsfwBit(1)" (change)="toggleNsfwBit(1)">
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+                <div class="nsfw-toggle-row">
+                  <div class="nsfw-toggle-info">
+                    <span class="nsfw-toggle-label">PG-13</span>
+                    <span class="nsfw-toggle-desc">Ropa sugerente, gore ligero</span>
+                  </div>
+                  <label class="toggle-switch">
+                    <input type="checkbox" [checked]="hasNsfwBit(2)" (change)="toggleNsfwBit(2)">
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+                <div class="nsfw-toggle-row">
+                  <div class="nsfw-toggle-info">
+                    <span class="nsfw-toggle-label">R</span>
+                    <span class="nsfw-toggle-desc">Desnudez parcial, situaciones adultas</span>
+                  </div>
+                  <label class="toggle-switch">
+                    <input type="checkbox" [checked]="hasNsfwBit(4)" (change)="toggleNsfwBit(4)">
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+                <div class="nsfw-toggle-row">
+                  <div class="nsfw-toggle-info">
+                    <span class="nsfw-toggle-label">X</span>
+                    <span class="nsfw-toggle-desc">Desnudez expl&iacute;cita, contenido adulto</span>
+                  </div>
+                  <label class="toggle-switch">
+                    <input type="checkbox" [checked]="hasNsfwBit(8)" (change)="toggleNsfwBit(8)">
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+                <div class="nsfw-toggle-row">
+                  <div class="nsfw-toggle-info">
+                    <span class="nsfw-toggle-label">XXX</span>
+                    <span class="nsfw-toggle-desc">Contenido extremo</span>
+                  </div>
+                  <label class="toggle-switch">
+                    <input type="checkbox" [checked]="hasNsfwBit(16)" (change)="toggleNsfwBit(16)">
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -270,6 +396,166 @@ import {
             [class.success]="connectionTestResult.status === 'ok'"
             [class.error]="connectionTestResult.status === 'error'">
             {{ connectionTestResult.message }}
+          </div>
+        </div>
+      </ng-container>
+
+      <!-- ============ MODELS TAB ============ -->
+      <ng-container *ngIf="activeTab === 'models'">
+        <div class="sub-tabs">
+          <button class="sub-tab" [class.active]="modelsView === 'search'" (click)="modelsView = 'search'">Buscar</button>
+          <button class="sub-tab" [class.active]="modelsView === 'cache'" (click)="modelsView = 'cache'; loadCache()">
+            Descargados
+            <span class="sub-tab-badge" *ngIf="cacheItems.length > 0">{{ cacheItems.length }}</span>
+          </button>
+        </div>
+
+        <!-- SEARCH -->
+        <ng-container *ngIf="modelsView === 'search'">
+          <div class="search-bar">
+            <input class="input-field search-input" type="text" [(ngModel)]="civitaiQuery"
+                   placeholder="Buscar modelos en CivitAI..." (keydown.enter)="handleCivitaiSearch()">
+            <button class="search-btn" (click)="handleCivitaiSearch()" [disabled]="civitaiSearching">
+              <span *ngIf="civitaiSearching" class="spinner" style="width:16px;height:16px;"></span>
+              <span *ngIf="!civitaiSearching">&#128269;</span>
+            </button>
+          </div>
+
+          <div class="type-chips">
+            <button *ngFor="let t of modelTypeOptions" class="type-chip"
+                    [class.active]="civitaiType === t.value"
+                    (click)="civitaiType = t.value; handleCivitaiSearch()">
+              {{ t.label }}
+            </button>
+          </div>
+
+          <div class="sort-row">
+            <select class="select-field sort-select" [(ngModel)]="civitaiSort" (ngModelChange)="handleCivitaiSearch()">
+              <option value="Most Downloaded">M&aacute;s descargados</option>
+              <option value="Highest Rated">Mejor valorados</option>
+              <option value="Newest">M&aacute;s recientes</option>
+            </select>
+          </div>
+
+          <div class="model-grid" *ngIf="civitaiResults.length > 0">
+            <div class="model-card" *ngFor="let model of civitaiResults"
+                 (click)="handleOpenModelDetail(model)" tabindex="0" role="button">
+              <div class="model-card-img">
+                <img *ngIf="getModelThumb(model)" [src]="getModelThumb(model)" [alt]="model.name" loading="lazy">
+                <div class="model-type-badge" [style.background]="getTypeColor(model.type)">{{ model.type }}</div>
+              </div>
+              <div class="model-card-body">
+                <span class="model-card-name">{{ model.name }}</span>
+                <span class="model-card-stats">
+                  &darr;{{ formatNumber(model.stats?.downloadCount) }}
+                  &nbsp;&nbsp;&#9733;{{ model.stats?.rating?.toFixed(1) || '-' }}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div *ngIf="civitaiResults.length === 0 && !civitaiSearching && civitaiSearched" class="empty-gallery">
+            <p>Sin resultados</p>
+          </div>
+
+          <div *ngIf="civitaiSearching" class="gallery-loading"><span class="spinner"></span></div>
+
+          <button *ngIf="civitaiHasMore && !civitaiSearching" class="btn btn-secondary load-more-btn"
+                  (click)="handleCivitaiLoadMore()">Cargar m&aacute;s</button>
+        </ng-container>
+
+        <!-- CACHE -->
+        <ng-container *ngIf="modelsView === 'cache'">
+          <div *ngIf="cacheItems.length === 0 && !cacheLoading" class="empty-gallery">
+            <div class="empty-icon">&#128230;</div>
+            <p>Sin modelos descargados</p>
+            <p class="empty-sub">Busca y descarga modelos de CivitAI</p>
+          </div>
+
+          <div *ngIf="cacheLoading && cacheItems.length === 0" class="gallery-loading"><span class="spinner"></span></div>
+
+          <div class="cache-list" *ngIf="cacheItems.length > 0">
+            <div class="cache-item" *ngFor="let item of cacheItems">
+              <div class="cache-item-info">
+                <span class="cache-item-name">{{ item.name }}</span>
+                <div class="cache-item-meta">
+                  <span class="model-type-badge small" [style.background]="getTypeColor(item.type)">{{ item.type }}</span>
+                  <span>{{ formatBytes(item.size_bytes) }}</span>
+                </div>
+                <div class="cache-progress-bar" *ngIf="item.status === 'downloading'">
+                  <div class="cache-progress-fill" [style.width.%]="item.progress"></div>
+                </div>
+                <span class="cache-item-status" *ngIf="item.status === 'downloading'">
+                  {{ item.progress?.toFixed(0) }}% &middot; {{ formatBytes(item.speed || 0) }}/s
+                </span>
+                <span class="cache-item-status error" *ngIf="item.status === 'error'">Error</span>
+              </div>
+              <button class="cache-delete-btn" (click)="handleDeleteCacheItem(item.id)"
+                      aria-label="Eliminar" *ngIf="item.status !== 'downloading'">&#128465;</button>
+            </div>
+          </div>
+        </ng-container>
+
+        <!-- MODEL DETAIL OVERLAY -->
+        <div class="model-detail-overlay" *ngIf="modelDetailOpen" (click)="modelDetailOpen = false">
+          <div class="model-detail-panel" (click)="$event.stopPropagation()">
+            <div class="model-detail-header">
+              <button class="viewer-close" (click)="modelDetailOpen = false">&#10005;</button>
+              <h3 class="model-detail-title">{{ modelDetail?.name }}</h3>
+            </div>
+
+            <div *ngIf="modelDetailLoading" class="gallery-loading"><span class="spinner"></span></div>
+
+            <ng-container *ngIf="modelDetail && !modelDetailLoading">
+              <div class="model-detail-images" *ngIf="getDetailImages().length > 0">
+                <img *ngFor="let img of getDetailImages().slice(0, 4)" [src]="img" loading="lazy" class="model-detail-img">
+              </div>
+
+              <div class="model-detail-info">
+                <span class="model-type-badge" [style.background]="getTypeColor(modelDetail.type)">{{ modelDetail.type }}</span>
+                <span class="model-detail-creator" *ngIf="modelDetail.creator">{{ modelDetail.creator?.username }}</span>
+                <span class="model-detail-dl">&darr;{{ formatNumber(modelDetail.stats?.downloadCount) }}</span>
+              </div>
+
+              <div class="model-detail-section" *ngIf="getDetailTriggerWords().length > 0">
+                <label>Trigger words</label>
+                <div class="trigger-words">
+                  <span class="trigger-word" *ngFor="let w of getDetailTriggerWords()">{{ w }}</span>
+                </div>
+              </div>
+
+              <div class="model-detail-section">
+                <label>Versi&oacute;n</label>
+                <select class="select-field" [(ngModel)]="selectedVersionIdx"
+                        (ngModelChange)="selectedVersionIdx = $event">
+                  <option *ngFor="let v of modelDetail.modelVersions; let i = index" [ngValue]="i">
+                    {{ v.name }}
+                  </option>
+                </select>
+              </div>
+
+              <div class="model-detail-section" *ngIf="getSelectedVersion()?.files?.length">
+                <label>Archivos</label>
+                <div class="file-list">
+                  <div class="file-item" *ngFor="let f of getSelectedVersion().files">
+                    <div class="file-item-info">
+                      <span class="file-item-name">{{ f.name }}</span>
+                      <span class="file-item-meta">
+                        {{ formatBytes(f.sizeKB * 1024) }}
+                        <span *ngIf="f.metadata?.format"> &middot; {{ f.metadata.format }}</span>
+                        <span *ngIf="f.metadata?.fp"> &middot; {{ f.metadata.fp }}</span>
+                      </span>
+                    </div>
+                    <button class="btn btn-primary file-dl-btn"
+                            (click)="handleDownloadFile(f)"
+                            [disabled]="f._downloading">
+                      <span *ngIf="f._downloading" class="spinner" style="width:14px;height:14px;"></span>
+                      {{ f._downloading ? '' : 'Descargar' }}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </ng-container>
           </div>
         </div>
       </ng-container>
@@ -344,6 +630,14 @@ import {
         </button>
         <button
           class="nav-item"
+          [class.active]="activeTab === 'models'"
+          (click)="handleSwitchTab('models')"
+          aria-label="Modelos">
+          <span class="nav-icon">&#128230;</span>
+          <span class="nav-label">Modelos</span>
+        </button>
+        <button
+          class="nav-item"
           [class.active]="activeTab === 'config'"
           (click)="handleSwitchTab('config')"
           aria-label="Ajustes">
@@ -389,9 +683,46 @@ import {
     .auth-hint { font-size: 13px; color: var(--text-secondary); margin-bottom: 12px; line-height: 1.4; }
   `]
 })
-export class AppComponent implements OnInit {
-  activeTab: 'generate' | 'gallery' | 'config' = 'generate';
+export class AppComponent implements OnInit, OnDestroy {
+  appState: 'loading' | 'login' | 'app' = 'loading';
+  activeTab: 'generate' | 'gallery' | 'config' | 'models' = 'generate';
   comfyOnline = false;
+
+  loginUsername = '';
+  loginPassword = '';
+  loginError = '';
+  loggingIn = false;
+  isAuthEnabled = false;
+
+  modelsView: 'search' | 'cache' = 'search';
+  civitaiQuery = '';
+  civitaiType = '';
+  civitaiSort = 'Most Downloaded';
+  civitaiResults: any[] = [];
+  civitaiSearching = false;
+  civitaiSearched = false;
+  civitaiPage = 1;
+  civitaiCursor = '';
+  civitaiHasMore = false;
+
+  modelDetailOpen = false;
+  modelDetail: any = null;
+  modelDetailLoading = false;
+  selectedVersionIdx = 0;
+
+  cacheItems: CachedModel[] = [];
+  cacheLoading = false;
+  private cacheInterval?: ReturnType<typeof setInterval>;
+
+  modelTypeOptions: ModelTypeOption[] = [
+    { label: 'Todos', value: '' },
+    { label: 'Checkpoint', value: 'Checkpoint' },
+    { label: 'LoRA', value: 'LORA' },
+    { label: 'ControlNet', value: 'Controlnet' },
+    { label: 'VAE', value: 'VAE' },
+    { label: 'Embedding', value: 'TextualInversion' },
+    { label: 'Upscaler', value: 'Upscaler' },
+  ];
 
   prompt = '';
   negativePrompt = 'nsfw, explicit, worst quality, worst aesthetic, bad quality, average quality, oldest, old, very displeasing, displeasing';
@@ -414,6 +745,8 @@ export class AppComponent implements OnInit {
   configSecure = 'false';
   authUser = '';
   authPass = '';
+  civitaiApiKey = '';
+  civitaiNsfwLevel = '31';
   testingConnection = false;
   savingConfig = false;
   connectionTestResult: ConnectionTestResult | null = null;
@@ -431,17 +764,82 @@ export class AppComponent implements OnInit {
   toastMessage = '';
   toastType: 'success' | 'error' = 'success';
 
-  constructor(private generationService: GenerationService) {}
+  private sessionSub?: Subscription;
+  private healthInterval?: ReturnType<typeof setInterval>;
+
+  constructor(
+    private generationService: GenerationService,
+    private authService: AuthService,
+  ) {}
 
   ngOnInit() {
+    this.sessionSub = this.authService.sessionExpired$.subscribe(() => {
+      this.appState = 'login';
+      this.loginError = 'Sesi\u00f3n expirada';
+    });
+    this.checkAuthAndInit();
+  }
+
+  ngOnDestroy() {
+    this.sessionSub?.unsubscribe();
+    if (this.healthInterval) clearInterval(this.healthInterval);
+    if (this.cacheInterval) clearInterval(this.cacheInterval);
+  }
+
+  checkAuthAndInit() {
+    this.authService.checkStatus().subscribe({
+      next: (status) => {
+        this.isAuthEnabled = status.auth_enabled;
+        if (status.logged_in) {
+          this.appState = 'app';
+          this.initApp();
+        } else {
+          this.appState = 'login';
+        }
+      },
+      error: () => {
+        this.appState = 'app';
+        this.initApp();
+      }
+    });
+  }
+
+  private initApp() {
     this.loadConfig();
     this.checkHealth();
     this.loadModels();
     this.loadSamplers();
     this.loadSettings();
     this.loadGallery();
+    this.healthInterval = setInterval(() => this.checkHealth(), 30000);
+  }
 
-    setInterval(() => this.checkHealth(), 30000);
+  handleLogin() {
+    if (!this.loginUsername || !this.loginPassword) return;
+    this.loggingIn = true;
+    this.loginError = '';
+
+    this.authService.login(this.loginUsername, this.loginPassword).subscribe({
+      next: () => {
+        this.loggingIn = false;
+        this.loginUsername = '';
+        this.loginPassword = '';
+        this.appState = 'app';
+        this.initApp();
+      },
+      error: (err) => {
+        this.loggingIn = false;
+        this.loginError = err.status === 401
+          ? 'Usuario o contrase\u00f1a incorrectos'
+          : 'Error de conexi\u00f3n';
+      }
+    });
+  }
+
+  handleLogout() {
+    this.authService.logout();
+    this.appState = 'login';
+    this.loginError = '';
   }
 
   @HostListener('document:keydown', ['$event'])
@@ -452,7 +850,7 @@ export class AppComponent implements OnInit {
     if (e.key === 'ArrowRight') this.handleViewerNext(e);
   }
 
-  handleSwitchTab(tab: 'generate' | 'gallery' | 'config') {
+  handleSwitchTab(tab: 'generate' | 'gallery' | 'config' | 'models') {
     this.activeTab = tab;
     if (tab === 'gallery') this.loadGallery();
   }
@@ -466,12 +864,17 @@ export class AppComponent implements OnInit {
 
   loadConfig() {
     this.generationService.getConfig().subscribe({
-      next: (cfg: ComfyConfig) => {
+      next: (cfg: any) => {
         this.configHost = cfg.comfyui_host || '';
         this.configPort = cfg.comfyui_port || '8188';
         this.configSecure = cfg.comfyui_secure || 'false';
         this.authUser = cfg.auth_user || '';
         this.authPass = cfg.auth_pass || '';
+        this.civitaiApiKey = cfg.civitai_api_key || '';
+        this.civitaiNsfwLevel = cfg.civitai_nsfw_level || '31';
+        if (cfg.auth_enabled !== undefined) {
+          this.isAuthEnabled = cfg.auth_enabled;
+        }
       },
       error: () => {}
     });
@@ -547,7 +950,8 @@ export class AppComponent implements OnInit {
   }
 
   getImageUrl(imgId: string): string {
-    return this.generationService.getGalleryImageUrl(imgId);
+    const base = this.generationService.getGalleryImageUrl(imgId);
+    return this.authService.getAuthenticatedUrl(base);
   }
 
   formatTime(ts: number): string {
@@ -688,10 +1092,20 @@ export class AppComponent implements OnInit {
       comfyui_secure: this.configSecure,
       auth_user: this.authUser,
       auth_pass: this.authPass,
+      civitai_api_key: this.civitaiApiKey,
+      civitai_nsfw_level: this.civitaiNsfwLevel,
     }).subscribe({
-      next: () => {
+      next: (res: any) => {
         this.savingConfig = false;
-        this.showToast('Configuraci\u00f3n guardada', 'success');
+        if (res?.token) {
+          this.authService.setToken(res.token);
+        }
+        this.isAuthEnabled = !!res?.auth_enabled;
+        if (res?.auth_activated) {
+          this.showToast('Autenticaci\u00f3n activada', 'success');
+        } else {
+          this.showToast('Configuraci\u00f3n guardada', 'success');
+        }
         this.checkHealth();
         this.loadModels();
       },
@@ -778,6 +1192,213 @@ export class AppComponent implements OnInit {
         error: () => {}
       });
     }, 2000);
+  }
+
+  // ─── CivitAI / Models ─────────────────────────────────────────────────
+
+  handleCivitaiSearch() {
+    this.civitaiPage = 1;
+    this.civitaiCursor = '';
+    this.civitaiResults = [];
+    this.civitaiSearched = true;
+    this.civitaiSearching = true;
+    this._doCivitaiSearch(false);
+  }
+
+  handleCivitaiLoadMore() {
+    this.civitaiSearching = true;
+    this._doCivitaiSearch(true);
+  }
+
+  private _doCivitaiSearch(append: boolean) {
+    const params: Record<string, string | number | boolean> = {
+      query: this.civitaiQuery,
+      types: this.civitaiType,
+      sort: this.civitaiSort,
+      limit: 20,
+    };
+    if (this.civitaiCursor) {
+      params['cursor'] = this.civitaiCursor;
+    } else if (!this.civitaiQuery) {
+      params['page'] = this.civitaiPage;
+    }
+
+    this.generationService.searchCivitai(params).subscribe({
+      next: (res: any) => {
+        const items = res.items || [];
+        this.civitaiResults = append ? [...this.civitaiResults, ...items] : items;
+        const meta = res.metadata || {};
+        this.civitaiCursor = meta.nextCursor || '';
+        this.civitaiHasMore = !!(meta.nextCursor || meta.nextPage);
+        if (!this.civitaiQuery && meta.nextPage) {
+          this.civitaiPage++;
+        }
+        this.civitaiSearching = false;
+      },
+      error: () => {
+        this.civitaiSearching = false;
+        if (!append) this.showToast('Error buscando en CivitAI', 'error');
+      },
+    });
+  }
+
+  handleOpenModelDetail(model: any) {
+    this.modelDetailOpen = true;
+    this.modelDetailLoading = true;
+    this.modelDetail = model;
+    this.selectedVersionIdx = 0;
+    this.generationService.getCivitaiModel(model.id).subscribe({
+      next: (detail: any) => {
+        this.modelDetail = detail;
+        this.modelDetailLoading = false;
+      },
+      error: () => {
+        this.modelDetailLoading = false;
+        this.showToast('Error cargando detalle', 'error');
+      },
+    });
+  }
+
+  getSelectedVersion(): any {
+    if (!this.modelDetail?.modelVersions) return null;
+    return this.modelDetail.modelVersions[this.selectedVersionIdx] || null;
+  }
+
+  getDetailImages(): string[] {
+    const version = this.getSelectedVersion();
+    if (!version?.images) return [];
+    return version.images.map((img: any) => img.url).filter(Boolean);
+  }
+
+  getDetailTriggerWords(): string[] {
+    const version = this.getSelectedVersion();
+    if (!version?.trainedWords) return [];
+    return version.trainedWords;
+  }
+
+  handleDownloadFile(file: any) {
+    if (!this.modelDetail) return;
+    const version = this.getSelectedVersion();
+    if (!version) return;
+
+    file._downloading = true;
+    const meta = {
+      thumbnail: this.getDetailImages()[0] || '',
+      triggerWords: this.getDetailTriggerWords(),
+      creator: this.modelDetail.creator?.username || '',
+    };
+    this.generationService.downloadModel({
+      civitai_model_id: this.modelDetail.id,
+      civitai_version_id: version.id,
+      download_url: file.downloadUrl,
+      name: this.modelDetail.name,
+      type: this.modelDetail.type,
+      filename: file.name,
+      size_bytes: (file.sizeKB || 0) * 1024,
+      metadata: JSON.stringify(meta),
+    }).subscribe({
+      next: () => {
+        file._downloading = false;
+        this.showToast('Descarga iniciada', 'success');
+        this.loadCache();
+      },
+      error: () => {
+        file._downloading = false;
+        this.showToast('Error iniciando descarga', 'error');
+      },
+    });
+  }
+
+  loadCache() {
+    this.cacheLoading = true;
+    this.generationService.getCache().subscribe({
+      next: (res) => {
+        this.cacheItems = res.items || [];
+        this.cacheLoading = false;
+        const hasActive = this.cacheItems.some(i => i.status === 'downloading');
+        if (hasActive && !this.cacheInterval) {
+          this.cacheInterval = setInterval(() => this.pollCache(), 2000);
+        }
+        if (!hasActive && this.cacheInterval) {
+          clearInterval(this.cacheInterval);
+          this.cacheInterval = undefined;
+        }
+      },
+      error: () => { this.cacheLoading = false; },
+    });
+  }
+
+  pollCache() {
+    this.generationService.getCache().subscribe({
+      next: (res) => {
+        this.cacheItems = res.items || [];
+        const hasActive = this.cacheItems.some(i => i.status === 'downloading');
+        if (!hasActive && this.cacheInterval) {
+          clearInterval(this.cacheInterval);
+          this.cacheInterval = undefined;
+        }
+      },
+    });
+  }
+
+  handleDeleteCacheItem(id: string) {
+    this.generationService.deleteCacheItem(id).subscribe({
+      next: () => {
+        this.cacheItems = this.cacheItems.filter(i => i.id !== id);
+        this.showToast('Modelo eliminado', 'success');
+      },
+      error: () => this.showToast('Error eliminando modelo', 'error'),
+    });
+  }
+
+  getModelThumb(model: any): string {
+    const versions = model.modelVersions;
+    if (!versions?.length) return '';
+    const images = versions[0]?.images;
+    if (!images?.length) return '';
+    return images[0]?.url || '';
+  }
+
+  getTypeColor(type: string): string {
+    const colors: Record<string, string> = {
+      Checkpoint: '#6366f1',
+      LORA: '#f59e0b',
+      LoCon: '#f59e0b',
+      Controlnet: '#22c55e',
+      VAE: '#ec4899',
+      TextualInversion: '#8b5cf6',
+      Hypernetwork: '#14b8a6',
+      Upscaler: '#0ea5e9',
+    };
+    return colors[type] || '#6b7280';
+  }
+
+  formatNumber(n: number | undefined): string {
+    if (!n) return '0';
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+    if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+    return String(n);
+  }
+
+  formatBytes(bytes: number): string {
+    if (!bytes) return '0 B';
+    if (bytes >= 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+    if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return bytes + ' B';
+  }
+
+  // ─── NSFW Level Toggles ──────────────────────────────────────────────
+
+  hasNsfwBit(bit: number): boolean {
+    const level = parseInt(this.civitaiNsfwLevel, 10) || 0;
+    return (level & bit) !== 0;
+  }
+
+  toggleNsfwBit(bit: number) {
+    let level = parseInt(this.civitaiNsfwLevel, 10) || 0;
+    level ^= bit;
+    this.civitaiNsfwLevel = String(level);
   }
 
   // ─── Utils ─────────────────────────────────────────────────────────────
