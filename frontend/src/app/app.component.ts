@@ -222,6 +222,31 @@ import {
             {{ configSecure === 'true' ? 'https' : 'http' }}://{{ configHost || '...' }}:{{ configPort || '...' }}
           </div>
 
+          <h2 class="card-title" style="margin-top: 8px;">Autenticaci&oacute;n (Basic Auth)</h2>
+          <p class="auth-hint">Protege esta app y la conexi&oacute;n a ComfyUI con las mismas credenciales. D&eacute;jalo vac&iacute;o para acceso libre.</p>
+
+          <div class="settings-grid">
+            <div class="input-group">
+              <label>Usuario</label>
+              <input
+                class="input-field"
+                type="text"
+                [(ngModel)]="authUser"
+                placeholder="admin"
+                autocomplete="username">
+            </div>
+
+            <div class="input-group">
+              <label>Contrase&ntilde;a</label>
+              <input
+                class="input-field"
+                type="password"
+                [(ngModel)]="authPass"
+                placeholder="&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;"
+                autocomplete="new-password">
+            </div>
+          </div>
+
           <div class="config-actions">
             <button
               class="btn btn-secondary"
@@ -361,6 +386,7 @@ import {
     .last-result { display: flex; gap: 8px; }
     .last-result-img { flex: 1; width: 100%; border-radius: 12px; cursor: pointer; }
     .last-result-img:active { transform: scale(0.98); }
+    .auth-hint { font-size: 13px; color: var(--text-secondary); margin-bottom: 12px; line-height: 1.4; }
   `]
 })
 export class AppComponent implements OnInit {
@@ -386,6 +412,8 @@ export class AppComponent implements OnInit {
   configHost = '';
   configPort = '8188';
   configSecure = 'false';
+  authUser = '';
+  authPass = '';
   testingConnection = false;
   savingConfig = false;
   connectionTestResult: ConnectionTestResult | null = null;
@@ -442,6 +470,8 @@ export class AppComponent implements OnInit {
         this.configHost = cfg.comfyui_host || '';
         this.configPort = cfg.comfyui_port || '8188';
         this.configSecure = cfg.comfyui_secure || 'false';
+        this.authUser = cfg.auth_user || '';
+        this.authPass = cfg.auth_pass || '';
       },
       error: () => {}
     });
@@ -638,6 +668,8 @@ export class AppComponent implements OnInit {
       comfyui_host: this.configHost,
       comfyui_port: this.configPort,
       comfyui_secure: this.configSecure,
+      auth_user: this.authUser,
+      auth_pass: this.authPass,
     }).subscribe({
       next: (result) => {
         this.testingConnection = false;
@@ -656,6 +688,8 @@ export class AppComponent implements OnInit {
       comfyui_host: this.configHost,
       comfyui_port: this.configPort,
       comfyui_secure: this.configSecure,
+      auth_user: this.authUser,
+      auth_pass: this.authPass,
     }).subscribe({
       next: () => {
         this.savingConfig = false;

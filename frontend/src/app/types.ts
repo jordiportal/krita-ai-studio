@@ -65,6 +65,8 @@ export interface ComfyConfig {
   comfyui_port: string;
   comfyui_secure: string;
   comfyui_url?: string;
+  auth_user?: string;
+  auth_pass?: string;
 }
 
 export interface ConnectionTestResult {

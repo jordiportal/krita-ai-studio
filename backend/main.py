@@ -3,11 +3,13 @@ Krita AI Studio Backend - FastAPI
 Replica EXACTAMENTE el comportamiento de krita-ai-diffusion
 Usa ETN_SaveImageCache (no PreviewImage) + /api/etn/image/{id}
 SQLite para persistir configuración del usuario, conexión ComfyUI y galería
+Basic Auth protege la app y se reenvía a ComfyUI
 """
 
 import os
 import base64
 import random
+import secrets
 import sqlite3
 import time
 import uuid
@@ -15,10 +17,11 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 import httpx
 
@@ -85,6 +88,8 @@ def init_db():
         "comfyui_host": os.getenv("COMFYUI_HOST", "comfyui.khlloreda.com"),
         "comfyui_port": os.getenv("COMFYUI_PORT", "80"),
         "comfyui_secure": os.getenv("COMFYUI_SECURE", "false"),
+        "auth_user": "",
+        "auth_pass": "",
     }
     for k, v in config_defaults.items():
         conn.execute(
@@ -136,6 +141,18 @@ def get_comfyui_url() -> str:
     port = cfg.get("comfyui_port", "8188")
     secure = cfg.get("comfyui_secure", "false").lower() == "true"
     return f"{'https' if secure else 'http'}://{host}:{port}"
+
+
+def get_auth_credentials() -> tuple[str, str]:
+    cfg = get_comfyui_config()
+    return cfg.get("auth_user", ""), cfg.get("auth_pass", "")
+
+
+def get_comfyui_auth() -> Optional[httpx.BasicAuth]:
+    user, pw = get_auth_credentials()
+    if user and pw:
+        return httpx.BasicAuth(user, pw)
+    return None
 
 
 def save_gallery_image(
@@ -200,6 +217,31 @@ def delete_gallery_image(img_id: str) -> bool:
 _job_meta: Dict[str, Dict[str, Any]] = {}
 
 
+# ─── Basic Auth Middleware ────────────────────────────────────────────────────
+
+class BasicAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        user, pw = get_auth_credentials()
+        if not user or not pw:
+            return await call_next(request)
+
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Basic "):
+            try:
+                decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+                req_user, req_pass = decoded.split(":", 1)
+                if secrets.compare_digest(req_user, user) and secrets.compare_digest(req_pass, pw):
+                    return await call_next(request)
+            except Exception:
+                pass
+
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Authentication required"},
+            headers={"WWW-Authenticate": 'Basic realm="Krita AI Studio"'},
+        )
+
+
 # ─── Schemas ──────────────────────────────────────────────────────────────────
 
 class GenerationRequest(BaseModel):
@@ -239,6 +281,8 @@ class ConfigPayload(BaseModel):
     comfyui_host: Optional[str] = None
     comfyui_port: Optional[str] = None
     comfyui_secure: Optional[str] = None
+    auth_user: Optional[str] = None
+    auth_pass: Optional[str] = None
 
 
 # ─── App ──────────────────────────────────────────────────────────────────────
@@ -247,8 +291,10 @@ class ConfigPayload(BaseModel):
 async def lifespan(app: FastAPI):
     init_db()
     url = get_comfyui_url()
+    user, pw = get_auth_credentials()
     print(f"Krita AI Studio Backend iniciado")
     print(f"ComfyUI URL: {url}")
+    print(f"Auth: {'enabled' if user and pw else 'disabled (open)'}")
     print(f"Database: {DB_PATH}")
     print(f"Gallery: {GALLERY_DIR}")
     yield
@@ -257,9 +303,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Krita AI Studio API",
-    version="2.3.0",
+    version="2.4.0",
     lifespan=lifespan,
 )
+
+app.add_middleware(BasicAuthMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -270,25 +318,33 @@ app.add_middleware(
 )
 
 
-# ─── Config endpoints (ComfyUI connection) ───────────────────────────────────
+# ─── Config endpoints (ComfyUI connection + auth) ────────────────────────────
 
 @app.get("/api/config")
 async def api_get_config():
     cfg = get_comfyui_config()
     url = get_comfyui_url()
-    return {**cfg, "comfyui_url": url}
+    safe_cfg = {**cfg, "comfyui_url": url}
+    if safe_cfg.get("auth_pass"):
+        safe_cfg["auth_pass"] = "••••••••"
+    return safe_cfg
 
 
 @app.post("/api/config")
 async def api_save_config(payload: ConfigPayload):
     data: Dict[str, str] = {}
     for field, val in payload.model_dump(exclude_none=True).items():
+        if field == "auth_pass" and val == "••••••••":
+            continue
         data[field] = str(val)
     if data:
         update_comfyui_config(data)
     cfg = get_comfyui_config()
     url = get_comfyui_url()
-    return {**cfg, "comfyui_url": url}
+    safe_cfg = {**cfg, "comfyui_url": url}
+    if safe_cfg.get("auth_pass"):
+        safe_cfg["auth_pass"] = "••••••••"
+    return safe_cfg
 
 
 @app.post("/api/config/test")
@@ -298,9 +354,19 @@ async def api_test_connection(payload: ConfigPayload):
     secure = (payload.comfyui_secure or "false").lower() == "true"
     url = f"{'https' if secure else 'http'}://{host}:{port}"
 
+    auth = None
+    test_user = payload.auth_user or ""
+    test_pass = payload.auth_pass or ""
+    if test_pass == "••••••••":
+        _, test_pass = get_auth_credentials()
+    if test_user and test_pass:
+        auth = httpx.BasicAuth(test_user, test_pass)
+
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(auth=auth) as client:
             resp = await client.get(f"{url}/system_stats", timeout=5.0)
+            if resp.status_code == 401:
+                return {"status": "error", "url": url, "message": "Auth rechazada (401)"}
             if resp.status_code == 200:
                 stats = resp.json()
                 vram = stats.get("devices", [{}])[0].get("vram_total", 0)
@@ -369,7 +435,7 @@ async def health_check():
     comfy_url = get_comfyui_url()
     comfy_status = "unknown"
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(auth=get_comfyui_auth()) as client:
             response = await client.get(f"{comfy_url}/system_stats", timeout=5.0)
             comfy_status = "ok" if response.status_code == 200 else "error"
     except Exception as e:
@@ -382,7 +448,7 @@ async def health_check():
 async def get_models():
     comfy_url = get_comfyui_url()
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(auth=get_comfyui_auth()) as client:
             response = await client.get(
                 f"{comfy_url}/object_info/CheckpointLoaderSimple", timeout=5.0
             )
@@ -458,7 +524,7 @@ async def txt2img(request: GenerationRequest):
         )
         print(f"Generating with seed={actual_seed}")
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(auth=get_comfyui_auth()) as client:
             response = await client.post(
                 f"{comfy_url}/prompt",
                 json={"prompt": workflow},
@@ -499,7 +565,7 @@ _saved_jobs: set = set()
 async def get_job_status(job_id: str):
     comfy_url = get_comfyui_url()
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(auth=get_comfyui_auth()) as client:
             queue_resp = await client.get(f"{comfy_url}/queue", timeout=5.0)
             if queue_resp.status_code == 200:
                 queue_data = queue_resp.json()
