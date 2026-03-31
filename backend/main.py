@@ -2,13 +2,15 @@
 Krita AI Studio Backend - FastAPI
 Replica EXACTAMENTE el comportamiento de krita-ai-diffusion
 Usa ETN_SaveImageCache (no PreviewImage) + /api/etn/image/{id}
-SQLite para persistir configuración del usuario y conexión ComfyUI
+SQLite para persistir configuración del usuario, conexión ComfyUI y galería
 """
 
 import os
 import base64
 import random
 import sqlite3
+import time
+import uuid
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
@@ -16,6 +18,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import httpx
 
@@ -23,12 +26,14 @@ from workflow_krita import create_txt2img_workflow_krita
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DB_PATH = DATA_DIR / "krita_ai.db"
+GALLERY_DIR = DATA_DIR / "gallery"
 
 
 # ─── SQLite helpers ───────────────────────────────────────────────────────────
 
 def init_db():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    GALLERY_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
 
     conn.execute("""
@@ -42,6 +47,19 @@ def init_db():
         CREATE TABLE IF NOT EXISTS config (
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS gallery (
+            id         TEXT PRIMARY KEY,
+            prompt     TEXT NOT NULL DEFAULT '',
+            neg_prompt TEXT NOT NULL DEFAULT '',
+            checkpoint TEXT NOT NULL DEFAULT '',
+            width      INTEGER NOT NULL DEFAULT 0,
+            height     INTEGER NOT NULL DEFAULT 0,
+            filename   TEXT NOT NULL,
+            created_at REAL NOT NULL
         )
     """)
 
@@ -120,6 +138,68 @@ def get_comfyui_url() -> str:
     return f"{'https' if secure else 'http'}://{host}:{port}"
 
 
+def save_gallery_image(
+    image_bytes: bytes, prompt: str, neg_prompt: str,
+    checkpoint: str, width: int, height: int,
+) -> Dict[str, Any]:
+    img_id = uuid.uuid4().hex[:12]
+    filename = f"{img_id}.png"
+    filepath = GALLERY_DIR / filename
+    filepath.write_bytes(image_bytes)
+
+    now = time.time()
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute(
+        "INSERT INTO gallery (id, prompt, neg_prompt, checkpoint, width, height, filename, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (img_id, prompt, neg_prompt, checkpoint, width, height, filename, now),
+    )
+    conn.commit()
+    conn.close()
+    return {
+        "id": img_id, "prompt": prompt, "checkpoint": checkpoint,
+        "width": width, "height": height, "filename": filename, "created_at": now,
+    }
+
+
+def list_gallery(limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT * FROM gallery ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        (limit, offset),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def count_gallery() -> int:
+    conn = sqlite3.connect(str(DB_PATH))
+    count = conn.execute("SELECT COUNT(*) FROM gallery").fetchone()[0]
+    conn.close()
+    return count
+
+
+def delete_gallery_image(img_id: str) -> bool:
+    conn = sqlite3.connect(str(DB_PATH))
+    row = conn.execute("SELECT filename FROM gallery WHERE id = ?", (img_id,)).fetchone()
+    if not row:
+        conn.close()
+        return False
+    filepath = GALLERY_DIR / row[0]
+    if filepath.exists():
+        filepath.unlink()
+    conn.execute("DELETE FROM gallery WHERE id = ?", (img_id,))
+    conn.commit()
+    conn.close()
+    return True
+
+
+# ─── In-memory job metadata (prompt info for gallery save) ───────────────────
+
+_job_meta: Dict[str, Dict[str, Any]] = {}
+
+
 # ─── Schemas ──────────────────────────────────────────────────────────────────
 
 class GenerationRequest(BaseModel):
@@ -170,13 +250,14 @@ async def lifespan(app: FastAPI):
     print(f"Krita AI Studio Backend iniciado")
     print(f"ComfyUI URL: {url}")
     print(f"Database: {DB_PATH}")
+    print(f"Gallery: {GALLERY_DIR}")
     yield
     print("Cerrando Krita AI Studio Backend")
 
 
 app = FastAPI(
     title="Krita AI Studio API",
-    version="2.2.0",
+    version="2.3.0",
     lifespan=lifespan,
 )
 
@@ -250,6 +331,35 @@ async def api_save_settings(payload: SettingsPayload):
     if data:
         update_settings(data)
     return get_all_settings()
+
+
+# ─── Gallery endpoints ───────────────────────────────────────────────────────
+
+@app.get("/api/gallery")
+async def api_list_gallery(limit: int = 50, offset: int = 0):
+    items = list_gallery(limit, offset)
+    total = count_gallery()
+    return {"items": items, "total": total}
+
+
+@app.get("/api/gallery/{img_id}/image")
+async def api_gallery_image(img_id: str):
+    conn = sqlite3.connect(str(DB_PATH))
+    row = conn.execute("SELECT filename FROM gallery WHERE id = ?", (img_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Image not found")
+    filepath = GALLERY_DIR / row[0]
+    if not filepath.exists():
+        raise HTTPException(status_code=404, detail="Image file missing")
+    return FileResponse(str(filepath), media_type="image/png")
+
+
+@app.delete("/api/gallery/{img_id}")
+async def api_delete_gallery(img_id: str):
+    if delete_gallery_image(img_id):
+        return {"status": "ok"}
+    raise HTTPException(status_code=404, detail="Image not found")
 
 
 # ─── Health / Models / Samplers ───────────────────────────────────────────────
@@ -361,6 +471,15 @@ async def txt2img(request: GenerationRequest):
 
             result = response.json()
             prompt_id = result.get("prompt_id")
+
+            _job_meta[prompt_id] = {
+                "prompt": request.prompt,
+                "neg_prompt": request.negative_prompt or "",
+                "checkpoint": request.checkpoint or "",
+                "width": request.width,
+                "height": request.height,
+            }
+
             return GenerationResponse(job_id=prompt_id, status="queued", images=None)
 
     except HTTPException:
@@ -373,6 +492,8 @@ async def txt2img(request: GenerationRequest):
 
 
 # ─── Job polling ──────────────────────────────────────────────────────────────
+
+_saved_jobs: set = set()
 
 @app.get("/api/jobs/{job_id}")
 async def get_job_status(job_id: str):
@@ -434,6 +555,7 @@ async def get_job_status(job_id: str):
 
                     outputs = job_data.get("outputs", {})
                     images_base64: List[str] = []
+                    images_raw: List[bytes] = []
 
                     for node_id, node_output in outputs.items():
                         if not isinstance(node_output, dict):
@@ -450,12 +572,29 @@ async def get_job_status(job_id: str):
                                         timeout=60.0,
                                     )
                                     if img_resp.status_code == 200:
+                                        images_raw.append(img_resp.content)
                                         img_b64 = base64.b64encode(
                                             img_resp.content
                                         ).decode("utf-8")
                                         images_base64.append(img_b64)
 
                     if images_base64:
+                        if job_id not in _saved_jobs:
+                            _saved_jobs.add(job_id)
+                            meta = _job_meta.pop(job_id, {})
+                            gallery_ids = []
+                            for raw in images_raw:
+                                entry = save_gallery_image(
+                                    image_bytes=raw,
+                                    prompt=meta.get("prompt", ""),
+                                    neg_prompt=meta.get("neg_prompt", ""),
+                                    checkpoint=meta.get("checkpoint", ""),
+                                    width=meta.get("width", 0),
+                                    height=meta.get("height", 0),
+                                )
+                                gallery_ids.append(entry["id"])
+                            print(f"Saved {len(gallery_ids)} images to gallery")
+
                         return {
                             "job_id": job_id,
                             "status": "completed",

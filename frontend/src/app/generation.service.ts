@@ -11,6 +11,7 @@ import {
   Settings,
   ComfyConfig,
   ConnectionTestResult,
+  GalleryResponse,
 } from './types';
 
 @Injectable({
@@ -62,5 +63,19 @@ export class GenerationService {
 
   getJobStatus(jobId: string): Observable<JobStatus> {
     return this.http.get<JobStatus>(`${this.apiUrl}/jobs/${jobId}`);
+  }
+
+  getGallery(limit: number = 50, offset: number = 0): Observable<GalleryResponse> {
+    return this.http.get<GalleryResponse>(
+      `${this.apiUrl}/gallery?limit=${limit}&offset=${offset}`
+    );
+  }
+
+  getGalleryImageUrl(imgId: string): string {
+    return `${this.apiUrl}/gallery/${imgId}/image`;
+  }
+
+  deleteGalleryImage(imgId: string): Observable<any> {
+    return this.http.delete(`${this.apiUrl}/gallery/${imgId}`);
   }
 }

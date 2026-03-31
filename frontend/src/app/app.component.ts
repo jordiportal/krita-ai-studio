@@ -1,9 +1,12 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnInit, HostListener } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { HttpClientModule } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { GenerationService } from './generation.service';
-import { Model, GenerationRequest, Settings, ComfyConfig, ConnectionTestResult } from './types';
+import {
+  Model, GenerationRequest, Settings, ComfyConfig,
+  ConnectionTestResult, GalleryItem,
+} from './types';
 
 @Component({
   selector: 'app-root',
@@ -11,22 +14,12 @@ import { Model, GenerationRequest, Settings, ComfyConfig, ConnectionTestResult }
   imports: [CommonModule, HttpClientModule, FormsModule],
   providers: [GenerationService],
   template: `
-    <div class="app-container">
+    <div class="app-container" [class.has-bottom-nav]="true">
       <header class="header">
         <h1>Krita AI</h1>
-        <div class="header-right">
-          <div class="status" [class.online]="comfyOnline" [class.offline]="!comfyOnline">
-            <span class="status-indicator"></span>
-            <span>{{ comfyOnline ? 'Online' : 'Offline' }}</span>
-          </div>
-          <button
-            class="config-btn"
-            [class.active]="activeTab === 'config'"
-            (click)="activeTab = activeTab === 'config' ? 'generate' : 'config'"
-            aria-label="Settings"
-            tabindex="0">
-            &#9881;
-          </button>
+        <div class="status" [class.online]="comfyOnline" [class.offline]="!comfyOnline">
+          <span class="status-indicator"></span>
+          <span>{{ comfyOnline ? 'Online' : 'Offline' }}</span>
         </div>
       </header>
 
@@ -140,21 +133,56 @@ import { Model, GenerationRequest, Settings, ComfyConfig, ConnectionTestResult }
           </div>
         </div>
 
-        <!-- Results -->
+        <!-- Last result -->
         <div class="card" *ngIf="generatedImages.length > 0">
-          <h2 class="card-title">Resultados</h2>
-          <div class="gallery">
-            <div
-              class="gallery-item"
+          <div class="last-result">
+            <img
               *ngFor="let img of generatedImages; let i = index"
-              (click)="handleDownload(img)"
-              tabindex="0"
-              role="button"
-              [attr.aria-label]="'Descargar imagen ' + (i + 1)">
-              <img [src]="img" [alt]="'Generated ' + i">
+              [src]="img"
+              [alt]="'Generated ' + i"
+              class="last-result-img"
+              (click)="handleViewLastResult(i)">
+          </div>
+        </div>
+      </ng-container>
+
+      <!-- ============ GALLERY TAB ============ -->
+      <ng-container *ngIf="activeTab === 'gallery'">
+        <div *ngIf="galleryItems.length === 0 && !galleryLoading" class="empty-gallery">
+          <div class="empty-icon">&#128444;</div>
+          <p>Sin im&aacute;genes a&uacute;n</p>
+          <p class="empty-sub">Las im&aacute;genes generadas aparecer&aacute;n aqu&iacute;</p>
+        </div>
+
+        <div *ngIf="galleryLoading && galleryItems.length === 0" class="gallery-loading">
+          <span class="spinner"></span>
+        </div>
+
+        <div class="gallery-grid" *ngIf="galleryItems.length > 0">
+          <div
+            class="gallery-thumb"
+            *ngFor="let item of galleryItems; let i = index"
+            (click)="handleOpenViewer(i)"
+            tabindex="0"
+            role="button"
+            [attr.aria-label]="item.prompt || 'Imagen ' + (i + 1)">
+            <img
+              [src]="getImageUrl(item.id)"
+              [alt]="item.prompt"
+              loading="lazy">
+            <div class="gallery-thumb-overlay">
+              <span class="gallery-thumb-time">{{ formatTime(item.created_at) }}</span>
             </div>
           </div>
         </div>
+
+        <button
+          *ngIf="galleryItems.length < galleryTotal"
+          class="btn btn-secondary load-more-btn"
+          (click)="handleLoadMore()"
+          [disabled]="galleryLoading">
+          {{ galleryLoading ? 'Cargando...' : 'Cargar m\u00e1s' }}
+        </button>
       </ng-container>
 
       <!-- ============ CONFIG TAB ============ -->
@@ -221,6 +249,84 @@ import { Model, GenerationRequest, Settings, ComfyConfig, ConnectionTestResult }
         </div>
       </ng-container>
 
+      <!-- ============ FULLSCREEN VIEWER ============ -->
+      <div
+        class="viewer-overlay"
+        *ngIf="viewerOpen"
+        (click)="handleCloseViewer()"
+        (touchstart)="handleTouchStart($event)"
+        (touchend)="handleTouchEnd($event)">
+
+        <div class="viewer-header">
+          <button class="viewer-close" (click)="handleCloseViewer()" aria-label="Cerrar">&#10005;</button>
+          <div class="viewer-counter">{{ viewerIndex + 1 }} / {{ viewerItems.length }}</div>
+          <div class="viewer-actions">
+            <button class="viewer-action-btn" (click)="handleDownloadViewer($event)" aria-label="Descargar">&#8595;</button>
+            <button
+              class="viewer-action-btn viewer-delete"
+              (click)="handleDeleteViewer($event)"
+              aria-label="Eliminar">&#128465;</button>
+          </div>
+        </div>
+
+        <div class="viewer-body" (click)="$event.stopPropagation()">
+          <button
+            *ngIf="viewerItems.length > 1"
+            class="viewer-nav viewer-prev"
+            (click)="handleViewerPrev($event)"
+            aria-label="Anterior">&#8249;</button>
+
+          <img
+            class="viewer-img"
+            [src]="viewerImageSrc"
+            [alt]="viewerItems[viewerIndex]?.prompt || ''"
+            (click)="$event.stopPropagation()">
+
+          <button
+            *ngIf="viewerItems.length > 1"
+            class="viewer-nav viewer-next"
+            (click)="handleViewerNext($event)"
+            aria-label="Siguiente">&#8250;</button>
+        </div>
+
+        <div class="viewer-info" *ngIf="viewerItems[viewerIndex]?.prompt" (click)="$event.stopPropagation()">
+          <p class="viewer-prompt">{{ viewerItems[viewerIndex]?.prompt }}</p>
+          <p class="viewer-meta" *ngIf="viewerItems[viewerIndex]?.checkpoint">
+            {{ viewerItems[viewerIndex]?.checkpoint }} &middot;
+            {{ viewerItems[viewerIndex]?.width }}&times;{{ viewerItems[viewerIndex]?.height }}
+          </p>
+        </div>
+      </div>
+
+      <!-- ============ BOTTOM NAV ============ -->
+      <nav class="bottom-nav">
+        <button
+          class="nav-item"
+          [class.active]="activeTab === 'generate'"
+          (click)="handleSwitchTab('generate')"
+          aria-label="Generar">
+          <span class="nav-icon">&#9998;</span>
+          <span class="nav-label">Generar</span>
+        </button>
+        <button
+          class="nav-item"
+          [class.active]="activeTab === 'gallery'"
+          (click)="handleSwitchTab('gallery')"
+          aria-label="Galer\u00eda">
+          <span class="nav-icon">&#9871;</span>
+          <span class="nav-label">Galer&iacute;a</span>
+          <span class="nav-badge" *ngIf="galleryTotal > 0">{{ galleryTotal }}</span>
+        </button>
+        <button
+          class="nav-item"
+          [class.active]="activeTab === 'config'"
+          (click)="handleSwitchTab('config')"
+          aria-label="Ajustes">
+          <span class="nav-icon">&#9881;</span>
+          <span class="nav-label">Ajustes</span>
+        </button>
+      </nav>
+
       <!-- Toast -->
       <div
         class="toast"
@@ -232,95 +338,33 @@ import { Model, GenerationRequest, Settings, ComfyConfig, ConnectionTestResult }
     </div>
   `,
   styles: [`
-    .header-right {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-    .config-btn {
-      background: var(--bg-input);
-      border: 1px solid var(--border);
-      color: var(--text-secondary);
-      font-size: 20px;
-      width: 40px;
-      height: 40px;
-      border-radius: 10px;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: all 0.2s;
-    }
-    .config-btn:hover, .config-btn.active {
-      color: var(--text-primary);
-      border-color: var(--primary);
-    }
     .advanced-card { padding-bottom: 8px; }
     .advanced-toggle {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      width: 100%;
-      background: none;
-      border: none;
-      color: var(--text-secondary);
-      font-size: 14px;
-      font-weight: 500;
-      cursor: pointer;
-      padding: 4px 0;
-      font-family: inherit;
+      display: flex; align-items: center; gap: 8px; width: 100%;
+      background: none; border: none; color: var(--text-secondary);
+      font-size: 14px; font-weight: 500; cursor: pointer; padding: 4px 0; font-family: inherit;
     }
     .advanced-toggle:hover { color: var(--text-primary); }
-    .advanced-toggle-icon {
-      display: inline-block;
-      font-size: 10px;
-      transition: transform 0.2s;
-    }
+    .advanced-toggle-icon { display: inline-block; font-size: 10px; transition: transform 0.2s; }
     .advanced-toggle-icon.open { transform: rotate(90deg); }
-    .advanced-body {
-      margin-top: 16px;
-      animation: fadeIn 0.15s ease;
-    }
+    .advanced-body { margin-top: 16px; }
     .config-url-preview {
-      font-family: monospace;
-      font-size: 13px;
-      color: var(--text-secondary);
-      background: var(--bg-input);
-      padding: 10px 14px;
-      border-radius: 8px;
-      margin-bottom: 16px;
-      word-break: break-all;
+      font-family: monospace; font-size: 13px; color: var(--text-secondary);
+      background: var(--bg-input); padding: 10px 14px; border-radius: 8px;
+      margin-bottom: 16px; word-break: break-all;
     }
-    .config-actions {
-      display: flex;
-      gap: 12px;
-      margin-bottom: 12px;
-    }
+    .config-actions { display: flex; gap: 12px; margin-bottom: 12px; }
     .config-actions .btn { flex: 1; }
-    .connection-result {
-      padding: 12px 16px;
-      border-radius: 10px;
-      font-size: 14px;
-      font-weight: 500;
-    }
-    .connection-result.success {
-      background: rgba(34, 197, 94, 0.15);
-      color: var(--success);
-      border: 1px solid rgba(34, 197, 94, 0.3);
-    }
-    .connection-result.error {
-      background: rgba(239, 68, 68, 0.15);
-      color: var(--error);
-      border: 1px solid rgba(239, 68, 68, 0.3);
-    }
-    @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(-4px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
+    .connection-result { padding: 12px 16px; border-radius: 10px; font-size: 14px; font-weight: 500; }
+    .connection-result.success { background: rgba(34,197,94,0.15); color: var(--success); border: 1px solid rgba(34,197,94,0.3); }
+    .connection-result.error { background: rgba(239,68,68,0.15); color: var(--error); border: 1px solid rgba(239,68,68,0.3); }
+    .last-result { display: flex; gap: 8px; }
+    .last-result-img { flex: 1; width: 100%; border-radius: 12px; cursor: pointer; }
+    .last-result-img:active { transform: scale(0.98); }
   `]
 })
 export class AppComponent implements OnInit {
-  activeTab: 'generate' | 'config' = 'generate';
+  activeTab: 'generate' | 'gallery' | 'config' = 'generate';
   comfyOnline = false;
 
   prompt = '';
@@ -346,6 +390,16 @@ export class AppComponent implements OnInit {
   savingConfig = false;
   connectionTestResult: ConnectionTestResult | null = null;
 
+  galleryItems: GalleryItem[] = [];
+  galleryTotal = 0;
+  galleryLoading = false;
+
+  viewerOpen = false;
+  viewerIndex = 0;
+  viewerItems: (GalleryItem & { src?: string })[] = [];
+  viewerImageSrc = '';
+  private touchStartX = 0;
+
   toastMessage = '';
   toastType: 'success' | 'error' = 'success';
 
@@ -357,8 +411,22 @@ export class AppComponent implements OnInit {
     this.loadModels();
     this.loadSamplers();
     this.loadSettings();
+    this.loadGallery();
 
     setInterval(() => this.checkHealth(), 30000);
+  }
+
+  @HostListener('document:keydown', ['$event'])
+  handleKeyboard(e: KeyboardEvent) {
+    if (!this.viewerOpen) return;
+    if (e.key === 'Escape') this.handleCloseViewer();
+    if (e.key === 'ArrowLeft') this.handleViewerPrev(e);
+    if (e.key === 'ArrowRight') this.handleViewerNext(e);
+  }
+
+  handleSwitchTab(tab: 'generate' | 'gallery' | 'config') {
+    this.activeTab = tab;
+    if (tab === 'gallery') this.loadGallery();
   }
 
   checkHealth() {
@@ -422,6 +490,146 @@ export class AppComponent implements OnInit {
     this.generationService.saveSettings({ [key]: value }).subscribe();
   }
 
+  // ─── Gallery ───────────────────────────────────────────────────────────
+
+  loadGallery() {
+    this.galleryLoading = true;
+    this.generationService.getGallery(50, 0).subscribe({
+      next: (res) => {
+        this.galleryItems = res.items;
+        this.galleryTotal = res.total;
+        this.galleryLoading = false;
+      },
+      error: () => { this.galleryLoading = false; }
+    });
+  }
+
+  handleLoadMore() {
+    this.galleryLoading = true;
+    this.generationService.getGallery(50, this.galleryItems.length).subscribe({
+      next: (res) => {
+        this.galleryItems = [...this.galleryItems, ...res.items];
+        this.galleryTotal = res.total;
+        this.galleryLoading = false;
+      },
+      error: () => { this.galleryLoading = false; }
+    });
+  }
+
+  getImageUrl(imgId: string): string {
+    return this.generationService.getGalleryImageUrl(imgId);
+  }
+
+  formatTime(ts: number): string {
+    const d = new Date(ts * 1000);
+    const now = new Date();
+    const diff = now.getTime() - d.getTime();
+    if (diff < 60000) return 'Ahora';
+    if (diff < 3600000) return `${Math.floor(diff / 60000)} min`;
+    if (diff < 86400000) return `${Math.floor(diff / 3600000)} h`;
+    return d.toLocaleDateString('es-ES', { day: 'numeric', month: 'short' });
+  }
+
+  // ─── Viewer ────────────────────────────────────────────────────────────
+
+  handleOpenViewer(index: number) {
+    this.viewerItems = this.galleryItems.map(item => ({
+      ...item,
+      src: this.getImageUrl(item.id),
+    }));
+    this.viewerIndex = index;
+    this.viewerImageSrc = this.viewerItems[index].src || '';
+    this.viewerOpen = true;
+  }
+
+  handleViewLastResult(index: number) {
+    if (this.generatedImages.length === 0) return;
+    this.viewerItems = this.generatedImages.map((img, i) => ({
+      id: `result-${i}`,
+      prompt: this.prompt,
+      neg_prompt: this.negativePrompt,
+      checkpoint: this.selectedModel,
+      width: this.width,
+      height: this.height,
+      filename: '',
+      created_at: Date.now() / 1000,
+      src: img,
+    }));
+    this.viewerIndex = index;
+    this.viewerImageSrc = this.viewerItems[index].src || '';
+    this.viewerOpen = true;
+  }
+
+  handleCloseViewer() {
+    this.viewerOpen = false;
+  }
+
+  handleViewerPrev(e: Event) {
+    e.stopPropagation();
+    if (this.viewerIndex > 0) {
+      this.viewerIndex--;
+      this.viewerImageSrc = this.viewerItems[this.viewerIndex].src || '';
+    }
+  }
+
+  handleViewerNext(e: Event) {
+    e.stopPropagation();
+    if (this.viewerIndex < this.viewerItems.length - 1) {
+      this.viewerIndex++;
+      this.viewerImageSrc = this.viewerItems[this.viewerIndex].src || '';
+    }
+  }
+
+  handleTouchStart(e: TouchEvent) {
+    this.touchStartX = e.changedTouches[0]?.clientX || 0;
+  }
+
+  handleTouchEnd(e: TouchEvent) {
+    const endX = e.changedTouches[0]?.clientX || 0;
+    const diff = endX - this.touchStartX;
+    if (Math.abs(diff) > 60) {
+      if (diff > 0) this.handleViewerPrev(e);
+      else this.handleViewerNext(e);
+    }
+  }
+
+  handleDownloadViewer(e: Event) {
+    e.stopPropagation();
+    const item = this.viewerItems[this.viewerIndex];
+    if (!item) return;
+    const link = document.createElement('a');
+    link.href = item.src || '';
+    link.download = `krita-ai-${item.id}.png`;
+    link.click();
+  }
+
+  handleDeleteViewer(e: Event) {
+    e.stopPropagation();
+    const item = this.viewerItems[this.viewerIndex];
+    if (!item || item.id.startsWith('result-')) return;
+
+    this.generationService.deleteGalleryImage(item.id).subscribe({
+      next: () => {
+        this.viewerItems.splice(this.viewerIndex, 1);
+        this.galleryItems = this.galleryItems.filter(g => g.id !== item.id);
+        this.galleryTotal = Math.max(0, this.galleryTotal - 1);
+
+        if (this.viewerItems.length === 0) {
+          this.handleCloseViewer();
+          return;
+        }
+        if (this.viewerIndex >= this.viewerItems.length) {
+          this.viewerIndex = this.viewerItems.length - 1;
+        }
+        this.viewerImageSrc = this.viewerItems[this.viewerIndex].src || '';
+        this.showToast('Imagen eliminada', 'success');
+      },
+      error: () => { this.showToast('Error al eliminar', 'error'); }
+    });
+  }
+
+  // ─── Config ────────────────────────────────────────────────────────────
+
   handleTestConnection() {
     this.testingConnection = true;
     this.connectionTestResult = null;
@@ -461,6 +669,8 @@ export class AppComponent implements OnInit {
       }
     });
   }
+
+  // ─── Generate ──────────────────────────────────────────────────────────
 
   handleGenerate() {
     if (!this.prompt) {
@@ -523,6 +733,7 @@ export class AppComponent implements OnInit {
                 img.startsWith('data:image') ? img : `data:image/png;base64,${img}`
               );
               this.showToast('Imagen generada!', 'success');
+              this.loadGallery();
             } else {
               this.showToast('No se gener\u00f3 ninguna imagen', 'error');
             }
@@ -537,12 +748,7 @@ export class AppComponent implements OnInit {
     }, 2000);
   }
 
-  handleDownload(img: string) {
-    const link = document.createElement('a');
-    link.href = img;
-    link.download = `krita-ai-${Date.now()}.png`;
-    link.click();
-  }
+  // ─── Utils ─────────────────────────────────────────────────────────────
 
   showToast(message: string, type: 'success' | 'error') {
     this.toastMessage = message;

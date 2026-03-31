@@ -73,3 +73,19 @@ export interface ConnectionTestResult {
   message: string;
   vram_gb?: number;
 }
+
+export interface GalleryItem {
+  id: string;
+  prompt: string;
+  neg_prompt: string;
+  checkpoint: string;
+  width: number;
+  height: number;
+  filename: string;
+  created_at: number;
+}
+
+export interface GalleryResponse {
+  items: GalleryItem[];
+  total: number;
+}
