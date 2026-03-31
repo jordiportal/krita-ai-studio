@@ -3,7 +3,7 @@ import { CommonModule } from '@angular/common';
 import { HttpClientModule } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { GenerationService } from './generation.service';
-import { ComfyStatus, Model, GenerationRequest, Settings } from './types';
+import { Model, GenerationRequest, Settings, ComfyConfig, ConnectionTestResult } from './types';
 
 @Component({
   selector: 'app-root',
@@ -14,135 +14,212 @@ import { ComfyStatus, Model, GenerationRequest, Settings } from './types';
     <div class="app-container">
       <header class="header">
         <h1>Krita AI</h1>
-        <div class="status" [class.online]="comfyOnline" [class.offline]="!comfyOnline">
-          <span class="status-indicator"></span>
-          <span>{{ comfyOnline ? 'Online' : 'Offline' }}</span>
+        <div class="header-right">
+          <div class="status" [class.online]="comfyOnline" [class.offline]="!comfyOnline">
+            <span class="status-indicator"></span>
+            <span>{{ comfyOnline ? 'Online' : 'Offline' }}</span>
+          </div>
+          <button
+            class="config-btn"
+            [class.active]="activeTab === 'config'"
+            (click)="activeTab = activeTab === 'config' ? 'generate' : 'config'"
+            aria-label="Settings"
+            tabindex="0">
+            &#9881;
+          </button>
         </div>
       </header>
 
-      <!-- Main controls (like Krita plugin) -->
-      <div class="card">
-        <div class="input-group">
-          <label>Prompt</label>
-          <textarea
-            class="textarea-field"
-            [(ngModel)]="prompt"
-            placeholder="Describe la imagen que quieres generar..."
-            rows="3"
-            (keydown.meta.enter)="handleGenerate()"
-            (keydown.control.enter)="handleGenerate()">
-          </textarea>
+      <!-- ============ GENERATE TAB ============ -->
+      <ng-container *ngIf="activeTab === 'generate'">
+        <div class="card">
+          <div class="input-group">
+            <label>Prompt</label>
+            <textarea
+              class="textarea-field"
+              [(ngModel)]="prompt"
+              placeholder="Describe la imagen que quieres generar..."
+              rows="3"
+              (keydown.meta.enter)="handleGenerate()"
+              (keydown.control.enter)="handleGenerate()">
+            </textarea>
+          </div>
+
+          <div class="input-group">
+            <label>Strength: {{ strength }}</label>
+            <div class="slider-container">
+              <input type="range" min="0.1" max="1" step="0.05" [(ngModel)]="strength">
+              <span class="slider-value">{{ strength }}</span>
+            </div>
+          </div>
+
+          <button
+            class="btn btn-primary"
+            (click)="handleGenerate()"
+            [disabled]="generating || !comfyOnline">
+            <span *ngIf="generating" class="spinner"></span>
+            <span>{{ generating ? 'Generando...' : 'Generar Imagen' }}</span>
+          </button>
         </div>
 
-        <div class="input-group">
-          <label>Strength: {{ strength }}</label>
-          <div class="slider-container">
-            <input type="range" min="0.1" max="1" step="0.05" [(ngModel)]="strength">
-            <span class="slider-value">{{ strength }}</span>
+        <!-- Advanced options -->
+        <div class="card advanced-card">
+          <button
+            class="advanced-toggle"
+            (click)="showAdvanced = !showAdvanced"
+            [attr.aria-expanded]="showAdvanced"
+            tabindex="0">
+            <span class="advanced-toggle-icon" [class.open]="showAdvanced">&#9654;</span>
+            Opciones avanzadas
+          </button>
+
+          <div *ngIf="showAdvanced" class="advanced-body">
+            <div class="input-group">
+              <label>Negative Prompt</label>
+              <textarea
+                class="textarea-field"
+                [(ngModel)]="negativePrompt"
+                placeholder="Lo que NO quieres en la imagen..."
+                rows="2">
+              </textarea>
+            </div>
+
+            <div class="settings-grid">
+              <div class="input-group">
+                <label>Modelo</label>
+                <select class="select-field" [(ngModel)]="selectedModel" (ngModelChange)="handleSaveSetting('checkpoint', $event)">
+                  <option *ngFor="let model of models" [value]="model.name">{{ model.name }}</option>
+                  <option *ngIf="models.length === 0" value="">Cargando...</option>
+                </select>
+              </div>
+
+              <div class="input-group">
+                <label>Sampler</label>
+                <select class="select-field" [(ngModel)]="sampler" (ngModelChange)="handleSaveSetting('sampler', $event)">
+                  <option value="">Auto</option>
+                  <option *ngFor="let s of samplers" [value]="s">{{ s }}</option>
+                </select>
+              </div>
+
+              <div class="input-group">
+                <label>Steps: {{ steps === 0 ? 'Auto' : steps }}</label>
+                <div class="slider-container">
+                  <input type="range" min="0" max="50" [(ngModel)]="steps" (change)="handleSaveSetting('steps', steps)">
+                </div>
+              </div>
+
+              <div class="input-group">
+                <label>CFG: {{ cfg === 0 ? 'Auto' : cfg }}</label>
+                <div class="slider-container">
+                  <input type="range" min="0" max="20" step="0.5" [(ngModel)]="cfg" (change)="handleSaveSetting('cfg', cfg)">
+                </div>
+              </div>
+
+              <div class="input-group">
+                <label>Ancho</label>
+                <select class="select-field" [(ngModel)]="width" (ngModelChange)="handleSaveSetting('width', $event)">
+                  <option [ngValue]="512">512</option>
+                  <option [ngValue]="768">768</option>
+                  <option [ngValue]="1024">1024</option>
+                  <option [ngValue]="1280">1280</option>
+                  <option [ngValue]="1536">1536</option>
+                </select>
+              </div>
+
+              <div class="input-group">
+                <label>Alto</label>
+                <select class="select-field" [(ngModel)]="height" (ngModelChange)="handleSaveSetting('height', $event)">
+                  <option [ngValue]="512">512</option>
+                  <option [ngValue]="768">768</option>
+                  <option [ngValue]="1024">1024</option>
+                  <option [ngValue]="1280">1280</option>
+                  <option [ngValue]="1536">1536</option>
+                </select>
+              </div>
+            </div>
           </div>
         </div>
 
-        <button
-          class="btn btn-primary"
-          (click)="handleGenerate()"
-          [disabled]="generating || !comfyOnline">
-          <span *ngIf="generating" class="spinner"></span>
-          <span>{{ generating ? 'Generando...' : 'Generar Imagen' }}</span>
-        </button>
-      </div>
+        <!-- Results -->
+        <div class="card" *ngIf="generatedImages.length > 0">
+          <h2 class="card-title">Resultados</h2>
+          <div class="gallery">
+            <div
+              class="gallery-item"
+              *ngFor="let img of generatedImages; let i = index"
+              (click)="handleDownload(img)"
+              tabindex="0"
+              role="button"
+              [attr.aria-label]="'Descargar imagen ' + (i + 1)">
+              <img [src]="img" [alt]="'Generated ' + i">
+            </div>
+          </div>
+        </div>
+      </ng-container>
 
-      <!-- Advanced options (collapsible) -->
-      <div class="card advanced-card">
-        <button
-          class="advanced-toggle"
-          (click)="handleToggleAdvanced()"
-          aria-label="Toggle advanced options"
-          [attr.aria-expanded]="showAdvanced">
-          <span class="advanced-toggle-icon" [class.open]="showAdvanced">&#9654;</span>
-          Opciones avanzadas
-        </button>
+      <!-- ============ CONFIG TAB ============ -->
+      <ng-container *ngIf="activeTab === 'config'">
+        <div class="card">
+          <h2 class="card-title">Conexi&oacute;n ComfyUI</h2>
 
-        <div *ngIf="showAdvanced" class="advanced-body">
           <div class="input-group">
-            <label>Negative Prompt</label>
-            <textarea
-              class="textarea-field"
-              [(ngModel)]="negativePrompt"
-              placeholder="Lo que NO quieres en la imagen (vacío = auto según modelo)..."
-              rows="2">
-            </textarea>
+            <label>Host</label>
+            <input
+              class="input-field"
+              type="text"
+              [(ngModel)]="configHost"
+              placeholder="comfyui.example.com o 192.168.1.100">
           </div>
 
           <div class="settings-grid">
             <div class="input-group">
-              <label>Modelo</label>
-              <select class="select-field" [(ngModel)]="selectedModel" (ngModelChange)="handleSaveSetting('checkpoint', $event)">
-                <option *ngFor="let model of models" [value]="model.name">
-                  {{ model.name }}
-                </option>
-                <option *ngIf="models.length === 0" value="">Cargando...</option>
-              </select>
+              <label>Puerto</label>
+              <input
+                class="input-field"
+                type="text"
+                [(ngModel)]="configPort"
+                placeholder="8188">
             </div>
 
             <div class="input-group">
-              <label>Sampler</label>
-              <select class="select-field" [(ngModel)]="sampler" (ngModelChange)="handleSaveSetting('sampler', $event)">
-                <option value="">Auto</option>
-                <option *ngFor="let s of samplers" [value]="s">{{ s }}</option>
-              </select>
-            </div>
-
-            <div class="input-group">
-              <label>Steps: {{ steps === 0 ? 'Auto' : steps }}</label>
-              <div class="slider-container">
-                <input type="range" min="0" max="50" [(ngModel)]="steps" (change)="handleSaveSetting('steps', steps)">
-              </div>
-            </div>
-
-            <div class="input-group">
-              <label>CFG: {{ cfg === 0 ? 'Auto' : cfg }}</label>
-              <div class="slider-container">
-                <input type="range" min="0" max="20" step="0.5" [(ngModel)]="cfg" (change)="handleSaveSetting('cfg', cfg)">
-              </div>
-            </div>
-
-            <div class="input-group">
-              <label>Ancho</label>
-              <select class="select-field" [(ngModel)]="width" (ngModelChange)="handleSaveSetting('width', $event)">
-                <option [ngValue]="512">512</option>
-                <option [ngValue]="768">768</option>
-                <option [ngValue]="1024">1024</option>
-                <option [ngValue]="1280">1280</option>
-                <option [ngValue]="1536">1536</option>
-              </select>
-            </div>
-
-            <div class="input-group">
-              <label>Alto</label>
-              <select class="select-field" [(ngModel)]="height" (ngModelChange)="handleSaveSetting('height', $event)">
-                <option [ngValue]="512">512</option>
-                <option [ngValue]="768">768</option>
-                <option [ngValue]="1024">1024</option>
-                <option [ngValue]="1280">1280</option>
-                <option [ngValue]="1536">1536</option>
+              <label>Protocolo</label>
+              <select class="select-field" [(ngModel)]="configSecure">
+                <option value="false">HTTP</option>
+                <option value="true">HTTPS</option>
               </select>
             </div>
           </div>
-        </div>
-      </div>
 
-      <!-- Results -->
-      <div class="card" *ngIf="generatedImages.length > 0">
-        <h2 class="card-title">Resultados</h2>
-        <div class="gallery">
+          <div class="config-url-preview">
+            {{ configSecure === 'true' ? 'https' : 'http' }}://{{ configHost || '...' }}:{{ configPort || '...' }}
+          </div>
+
+          <div class="config-actions">
+            <button
+              class="btn btn-secondary"
+              (click)="handleTestConnection()"
+              [disabled]="testingConnection">
+              <span *ngIf="testingConnection" class="spinner"></span>
+              <span>{{ testingConnection ? 'Probando...' : 'Probar conexi\u00f3n' }}</span>
+            </button>
+
+            <button
+              class="btn btn-primary"
+              (click)="handleSaveConfig()"
+              [disabled]="savingConfig">
+              Guardar
+            </button>
+          </div>
+
           <div
-            class="gallery-item"
-            *ngFor="let img of generatedImages; let i = index"
-            (click)="handleDownload(img)">
-            <img [src]="img" [alt]="'Generated ' + i">
+            *ngIf="connectionTestResult"
+            class="connection-result"
+            [class.success]="connectionTestResult.status === 'ok'"
+            [class.error]="connectionTestResult.status === 'error'">
+            {{ connectionTestResult.message }}
           </div>
         </div>
-      </div>
+      </ng-container>
 
       <!-- Toast -->
       <div
@@ -155,6 +232,29 @@ import { ComfyStatus, Model, GenerationRequest, Settings } from './types';
     </div>
   `,
   styles: [`
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .config-btn {
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      font-size: 20px;
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+    }
+    .config-btn:hover, .config-btn.active {
+      color: var(--text-primary);
+      border-color: var(--primary);
+    }
     .advanced-card { padding-bottom: 8px; }
     .advanced-toggle {
       display: flex;
@@ -181,6 +281,38 @@ import { ComfyStatus, Model, GenerationRequest, Settings } from './types';
       margin-top: 16px;
       animation: fadeIn 0.15s ease;
     }
+    .config-url-preview {
+      font-family: monospace;
+      font-size: 13px;
+      color: var(--text-secondary);
+      background: var(--bg-input);
+      padding: 10px 14px;
+      border-radius: 8px;
+      margin-bottom: 16px;
+      word-break: break-all;
+    }
+    .config-actions {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .config-actions .btn { flex: 1; }
+    .connection-result {
+      padding: 12px 16px;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 500;
+    }
+    .connection-result.success {
+      background: rgba(34, 197, 94, 0.15);
+      color: var(--success);
+      border: 1px solid rgba(34, 197, 94, 0.3);
+    }
+    .connection-result.error {
+      background: rgba(239, 68, 68, 0.15);
+      color: var(--error);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+    }
     @keyframes fadeIn {
       from { opacity: 0; transform: translateY(-4px); }
       to { opacity: 1; transform: translateY(0); }
@@ -188,6 +320,7 @@ import { ComfyStatus, Model, GenerationRequest, Settings } from './types';
   `]
 })
 export class AppComponent implements OnInit {
+  activeTab: 'generate' | 'config' = 'generate';
   comfyOnline = false;
 
   prompt = '';
@@ -206,12 +339,20 @@ export class AppComponent implements OnInit {
   samplers: string[] = [];
   generatedImages: string[] = [];
 
+  configHost = '';
+  configPort = '8188';
+  configSecure = 'false';
+  testingConnection = false;
+  savingConfig = false;
+  connectionTestResult: ConnectionTestResult | null = null;
+
   toastMessage = '';
   toastType: 'success' | 'error' = 'success';
 
   constructor(private generationService: GenerationService) {}
 
   ngOnInit() {
+    this.loadConfig();
     this.checkHealth();
     this.loadModels();
     this.loadSamplers();
@@ -227,21 +368,30 @@ export class AppComponent implements OnInit {
     });
   }
 
+  loadConfig() {
+    this.generationService.getConfig().subscribe({
+      next: (cfg: ComfyConfig) => {
+        this.configHost = cfg.comfyui_host || '';
+        this.configPort = cfg.comfyui_port || '8188';
+        this.configSecure = cfg.comfyui_secure || 'false';
+      },
+      error: () => {}
+    });
+  }
+
   loadModels() {
     this.generationService.getModels().subscribe({
       next: (data) => {
         const checkpoints = data.checkpoints || [];
         this.models = checkpoints.map((item: any) => {
-          if (typeof item === 'string') {
-            return { name: item, type: 'checkpoint' };
-          }
+          if (typeof item === 'string') return { name: item, type: 'checkpoint' };
           return { name: item.name || item, type: item.type || 'checkpoint' };
         });
         if (!this.selectedModel && this.models.length > 0) {
           this.selectedModel = this.models[0].name;
         }
       },
-      error: () => { this.showToast('Error cargando modelos', 'error'); }
+      error: () => {}
     });
   }
 
@@ -256,8 +406,7 @@ export class AppComponent implements OnInit {
     this.generationService.getSettings().subscribe({
       next: (s: Settings) => {
         if (s.checkpoint) this.selectedModel = s.checkpoint;
-        if (s.sampler) this.sampler = s.sampler;
-        if (s.scheduler) { /* reserved for future use */ }
+        if (s.sampler !== undefined) this.sampler = s.sampler;
         if (s.steps) this.steps = Number(s.steps) || 0;
         if (s.cfg) this.cfg = Number(s.cfg) || 0;
         if (s.width) this.width = Number(s.width) || 1024;
@@ -265,7 +414,7 @@ export class AppComponent implements OnInit {
         if (s.negative_prompt) this.negativePrompt = s.negative_prompt;
         if (s.strength) this.strength = Number(s.strength) || 1.0;
       },
-      error: () => { /* use defaults */ }
+      error: () => {}
     });
   }
 
@@ -273,8 +422,44 @@ export class AppComponent implements OnInit {
     this.generationService.saveSettings({ [key]: value }).subscribe();
   }
 
-  handleToggleAdvanced() {
-    this.showAdvanced = !this.showAdvanced;
+  handleTestConnection() {
+    this.testingConnection = true;
+    this.connectionTestResult = null;
+
+    this.generationService.testConnection({
+      comfyui_host: this.configHost,
+      comfyui_port: this.configPort,
+      comfyui_secure: this.configSecure,
+    }).subscribe({
+      next: (result) => {
+        this.testingConnection = false;
+        this.connectionTestResult = result;
+      },
+      error: () => {
+        this.testingConnection = false;
+        this.connectionTestResult = { status: 'error', url: '', message: 'Error de red al probar' };
+      }
+    });
+  }
+
+  handleSaveConfig() {
+    this.savingConfig = true;
+    this.generationService.saveConfig({
+      comfyui_host: this.configHost,
+      comfyui_port: this.configPort,
+      comfyui_secure: this.configSecure,
+    }).subscribe({
+      next: () => {
+        this.savingConfig = false;
+        this.showToast('Configuraci\u00f3n guardada', 'success');
+        this.checkHealth();
+        this.loadModels();
+      },
+      error: () => {
+        this.savingConfig = false;
+        this.showToast('Error al guardar', 'error');
+      }
+    });
   }
 
   handleGenerate() {
@@ -301,7 +486,7 @@ export class AppComponent implements OnInit {
 
     this.generationService.generateTxt2Img(request).subscribe({
       next: (response) => {
-        this.showToast('Generación iniciada', 'success');
+        this.showToast('Generaci\u00f3n iniciada', 'success');
         this.pollJob(response.job_id);
       },
       error: (err) => {
@@ -339,15 +524,15 @@ export class AppComponent implements OnInit {
               );
               this.showToast('Imagen generada!', 'success');
             } else {
-              this.showToast('No se generó ninguna imagen', 'error');
+              this.showToast('No se gener\u00f3 ninguna imagen', 'error');
             }
           } else if (status.status === 'error') {
             clearInterval(interval);
             this.generating = false;
-            this.showToast('Error: ' + (status.error || 'Generación fallida'), 'error');
+            this.showToast('Error: ' + (status.error || 'Generaci\u00f3n fallida'), 'error');
           }
         },
-        error: () => { /* keep polling */ }
+        error: () => {}
       });
     }, 2000);
   }

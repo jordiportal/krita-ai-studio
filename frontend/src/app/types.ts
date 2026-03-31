@@ -59,3 +59,17 @@ export interface Settings {
   negative_prompt?: string;
   strength?: string;
 }
+
+export interface ComfyConfig {
+  comfyui_host: string;
+  comfyui_port: string;
+  comfyui_secure: string;
+  comfyui_url?: string;
+}
+
+export interface ConnectionTestResult {
+  status: string;
+  url: string;
+  message: string;
+  vram_gb?: number;
+}

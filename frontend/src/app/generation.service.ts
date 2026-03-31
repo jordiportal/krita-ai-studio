@@ -9,6 +9,8 @@ import {
   GenerationResponse,
   JobStatus,
   Settings,
+  ComfyConfig,
+  ConnectionTestResult,
 } from './types';
 
 @Injectable({
@@ -37,6 +39,18 @@ export class GenerationService {
 
   saveSettings(data: Record<string, any>): Observable<Settings> {
     return this.http.post<Settings>(`${this.apiUrl}/settings`, data);
+  }
+
+  getConfig(): Observable<ComfyConfig> {
+    return this.http.get<ComfyConfig>(`${this.apiUrl}/config`);
+  }
+
+  saveConfig(data: Partial<ComfyConfig>): Observable<ComfyConfig> {
+    return this.http.post<ComfyConfig>(`${this.apiUrl}/config`, data);
+  }
+
+  testConnection(data: Partial<ComfyConfig>): Observable<ConnectionTestResult> {
+    return this.http.post<ConnectionTestResult>(`${this.apiUrl}/config/test`, data);
   }
 
   generateTxt2Img(request: GenerationRequest): Observable<GenerationResponse> {

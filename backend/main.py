@@ -1,8 +1,8 @@
 """
-Krita AI Plugin Backend - FastAPI
+Krita AI Studio Backend - FastAPI
 Replica EXACTAMENTE el comportamiento de krita-ai-diffusion
 Usa ETN_SaveImageCache (no PreviewImage) + /api/etn/image/{id}
-SQLite para persistir configuración del usuario
+SQLite para persistir configuración del usuario y conexión ComfyUI
 """
 
 import os
@@ -21,17 +21,8 @@ import httpx
 
 from workflow_krita import create_txt2img_workflow_krita
 
-# Configuración
-COMFYUI_HOST = os.getenv("COMFYUI_HOST", "comfyui.khlloreda.com")
-COMFYUI_PORT = int(os.getenv("COMFYUI_PORT", "80"))
-COMFYUI_SECURE = os.getenv("COMFYUI_SECURE", "false").lower() == "true"
-COMFYUI_URL = f"{'https' if COMFYUI_SECURE else 'http'}://{COMFYUI_HOST}:{COMFYUI_PORT}"
-
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DB_PATH = DATA_DIR / "krita_ai.db"
-
-print(f"ComfyUI configurado: {COMFYUI_URL}")
-print(f"Database path: {DB_PATH}")
 
 
 # ─── SQLite helpers ───────────────────────────────────────────────────────────
@@ -39,13 +30,22 @@ print(f"Database path: {DB_PATH}")
 def init_db():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
         )
     """)
-    defaults = {
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS config (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
+
+    setting_defaults = {
         "checkpoint": "novaAnimeXL_ilV125.safetensors",
         "sampler": "",
         "scheduler": "",
@@ -56,33 +56,68 @@ def init_db():
         "negative_prompt": "nsfw, explicit, worst quality, worst aesthetic, bad quality, average quality, oldest, old, very displeasing, displeasing",
         "strength": "1.0",
     }
-    for k, v in defaults.items():
+    for k, v in setting_defaults.items():
         conn.execute(
             "INSERT INTO settings (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = ? WHERE value = ''",
             (k, v, v),
+        )
+
+    config_defaults = {
+        "comfyui_host": os.getenv("COMFYUI_HOST", "comfyui.khlloreda.com"),
+        "comfyui_port": os.getenv("COMFYUI_PORT", "80"),
+        "comfyui_secure": os.getenv("COMFYUI_SECURE", "false"),
+    }
+    for k, v in config_defaults.items():
+        conn.execute(
+            "INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)", (k, v)
+        )
+
+    conn.commit()
+    conn.close()
+
+
+def _query_table(table: str) -> Dict[str, str]:
+    conn = sqlite3.connect(str(DB_PATH))
+    rows = conn.execute(f"SELECT key, value FROM {table}").fetchall()
+    conn.close()
+    return {k: v for k, v in rows}
+
+
+def _update_table(table: str, data: Dict[str, str]):
+    conn = sqlite3.connect(str(DB_PATH))
+    for k, v in data.items():
+        conn.execute(
+            f"INSERT INTO {table} (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (k, str(v)),
         )
     conn.commit()
     conn.close()
 
 
 def get_all_settings() -> Dict[str, str]:
-    conn = sqlite3.connect(str(DB_PATH))
-    rows = conn.execute("SELECT key, value FROM settings").fetchall()
-    conn.close()
-    return {k: v for k, v in rows}
+    return _query_table("settings")
 
 
 def update_settings(data: Dict[str, str]):
-    conn = sqlite3.connect(str(DB_PATH))
-    for k, v in data.items():
-        conn.execute(
-            "INSERT INTO settings (key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (k, str(v)),
-        )
-    conn.commit()
-    conn.close()
+    _update_table("settings", data)
+
+
+def get_comfyui_config() -> Dict[str, str]:
+    return _query_table("config")
+
+
+def update_comfyui_config(data: Dict[str, str]):
+    _update_table("config", data)
+
+
+def get_comfyui_url() -> str:
+    cfg = get_comfyui_config()
+    host = cfg.get("comfyui_host", "localhost")
+    port = cfg.get("comfyui_port", "8188")
+    secure = cfg.get("comfyui_secure", "false").lower() == "true"
+    return f"{'https' if secure else 'http'}://{host}:{port}"
 
 
 # ─── Schemas ──────────────────────────────────────────────────────────────────
@@ -120,21 +155,28 @@ class SettingsPayload(BaseModel):
     strength: Optional[float] = None
 
 
+class ConfigPayload(BaseModel):
+    comfyui_host: Optional[str] = None
+    comfyui_port: Optional[str] = None
+    comfyui_secure: Optional[str] = None
+
+
 # ─── App ──────────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    print(f"Krita AI Backend iniciado")
-    print(f"Conectado a ComfyUI: {COMFYUI_URL}")
+    url = get_comfyui_url()
+    print(f"Krita AI Studio Backend iniciado")
+    print(f"ComfyUI URL: {url}")
+    print(f"Database: {DB_PATH}")
     yield
-    print("Cerrando Krita AI Backend")
+    print("Cerrando Krita AI Studio Backend")
 
 
 app = FastAPI(
-    title="Krita AI Plugin API",
-    description="API que replica EXACTAMENTE krita-ai-diffusion via ComfyUI",
-    version="2.1.0",
+    title="Krita AI Studio API",
+    version="2.2.0",
     lifespan=lifespan,
 )
 
@@ -145,6 +187,52 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ─── Config endpoints (ComfyUI connection) ───────────────────────────────────
+
+@app.get("/api/config")
+async def api_get_config():
+    cfg = get_comfyui_config()
+    url = get_comfyui_url()
+    return {**cfg, "comfyui_url": url}
+
+
+@app.post("/api/config")
+async def api_save_config(payload: ConfigPayload):
+    data: Dict[str, str] = {}
+    for field, val in payload.model_dump(exclude_none=True).items():
+        data[field] = str(val)
+    if data:
+        update_comfyui_config(data)
+    cfg = get_comfyui_config()
+    url = get_comfyui_url()
+    return {**cfg, "comfyui_url": url}
+
+
+@app.post("/api/config/test")
+async def api_test_connection(payload: ConfigPayload):
+    host = payload.comfyui_host or "localhost"
+    port = payload.comfyui_port or "8188"
+    secure = (payload.comfyui_secure or "false").lower() == "true"
+    url = f"{'https' if secure else 'http'}://{host}:{port}"
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{url}/system_stats", timeout=5.0)
+            if resp.status_code == 200:
+                stats = resp.json()
+                vram = stats.get("devices", [{}])[0].get("vram_total", 0)
+                vram_gb = round(vram / (1024**3), 1) if vram else 0
+                return {
+                    "status": "ok",
+                    "url": url,
+                    "vram_gb": vram_gb,
+                    "message": f"Conectado ({vram_gb} GB VRAM)" if vram_gb else "Conectado",
+                }
+            return {"status": "error", "url": url, "message": f"HTTP {resp.status_code}"}
+    except Exception as e:
+        return {"status": "error", "url": url, "message": str(e)}
 
 
 # ─── Settings endpoints ──────────────────────────────────────────────────────
@@ -168,23 +256,25 @@ async def api_save_settings(payload: SettingsPayload):
 
 @app.get("/api/health")
 async def health_check():
+    comfy_url = get_comfyui_url()
     comfy_status = "unknown"
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(f"{COMFYUI_URL}/system_stats", timeout=5.0)
+            response = await client.get(f"{comfy_url}/system_stats", timeout=5.0)
             comfy_status = "ok" if response.status_code == 200 else "error"
     except Exception as e:
         comfy_status = f"error: {str(e)}"
 
-    return {"status": "ok", "comfyui": comfy_status, "comfyui_url": COMFYUI_URL}
+    return {"status": "ok", "comfyui": comfy_status, "comfyui_url": comfy_url}
 
 
 @app.get("/api/models")
 async def get_models():
+    comfy_url = get_comfyui_url()
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(
-                f"{COMFYUI_URL}/object_info/CheckpointLoaderSimple", timeout=5.0
+                f"{comfy_url}/object_info/CheckpointLoaderSimple", timeout=5.0
             )
             if response.status_code == 200:
                 info = response.json()
@@ -205,10 +295,7 @@ async def get_models():
         print(f"Error fetching models: {e}")
 
     return {
-        "checkpoints": [
-            {"name": "Illustrious-XL-v2.0.safetensors", "type": "checkpoint"},
-            {"name": "SDXL.safetensors", "type": "checkpoint"},
-        ],
+        "checkpoints": [],
         "loras": [],
         "controlnets": [],
         "fallback": True,
@@ -240,6 +327,7 @@ async def get_samplers():
 
 @app.post("/api/generate/txt2img", response_model=GenerationResponse)
 async def txt2img(request: GenerationRequest):
+    comfy_url = get_comfyui_url()
     try:
         actual_seed = request.seed
         if actual_seed < 0:
@@ -262,7 +350,7 @@ async def txt2img(request: GenerationRequest):
 
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{COMFYUI_URL}/prompt",
+                f"{comfy_url}/prompt",
                 json={"prompt": workflow},
                 timeout=5.0,
             )
@@ -288,10 +376,10 @@ async def txt2img(request: GenerationRequest):
 
 @app.get("/api/jobs/{job_id}")
 async def get_job_status(job_id: str):
+    comfy_url = get_comfyui_url()
     try:
         async with httpx.AsyncClient() as client:
-            # 1. Check queue (running / pending)
-            queue_resp = await client.get(f"{COMFYUI_URL}/queue", timeout=5.0)
+            queue_resp = await client.get(f"{comfy_url}/queue", timeout=5.0)
             if queue_resp.status_code == 200:
                 queue_data = queue_resp.json()
 
@@ -321,9 +409,8 @@ async def get_job_status(job_id: str):
                                 "progress": 0,
                             }
 
-            # 2. Check history
             response = await client.get(
-                f"{COMFYUI_URL}/history/{job_id}", timeout=10.0
+                f"{comfy_url}/history/{job_id}", timeout=10.0
             )
 
             if response.status_code == 200:
@@ -359,7 +446,7 @@ async def get_job_status(job_id: str):
                                 img_id = img.get("id")
                                 if img_id:
                                     img_resp = await client.get(
-                                        f"{COMFYUI_URL}/api/etn/image/{img_id}",
+                                        f"{comfy_url}/api/etn/image/{img_id}",
                                         timeout=60.0,
                                     )
                                     if img_resp.status_code == 200:
