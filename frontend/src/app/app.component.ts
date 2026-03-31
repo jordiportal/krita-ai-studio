@@ -223,7 +223,7 @@ import {
           </div>
 
           <h2 class="card-title" style="margin-top: 8px;">Autenticaci&oacute;n (Basic Auth)</h2>
-          <p class="auth-hint">Protege esta app y la conexi&oacute;n a ComfyUI con las mismas credenciales. D&eacute;jalo vac&iacute;o para acceso libre.</p>
+          <p class="auth-hint">Protege el acceso a esta app. D&eacute;jalo vac&iacute;o para acceso libre.</p>
 
           <div class="settings-grid">
             <div class="input-group">
@@ -668,8 +668,6 @@ export class AppComponent implements OnInit {
       comfyui_host: this.configHost,
       comfyui_port: this.configPort,
       comfyui_secure: this.configSecure,
-      auth_user: this.authUser,
-      auth_pass: this.authPass,
     }).subscribe({
       next: (result) => {
         this.testingConnection = false;

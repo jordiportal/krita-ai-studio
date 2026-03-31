@@ -148,13 +148,6 @@ def get_auth_credentials() -> tuple[str, str]:
     return cfg.get("auth_user", ""), cfg.get("auth_pass", "")
 
 
-def get_comfyui_auth() -> Optional[httpx.BasicAuth]:
-    user, pw = get_auth_credentials()
-    if user and pw:
-        return httpx.BasicAuth(user, pw)
-    return None
-
-
 def save_gallery_image(
     image_bytes: bytes, prompt: str, neg_prompt: str,
     checkpoint: str, width: int, height: int,
@@ -354,19 +347,9 @@ async def api_test_connection(payload: ConfigPayload):
     secure = (payload.comfyui_secure or "false").lower() == "true"
     url = f"{'https' if secure else 'http'}://{host}:{port}"
 
-    auth = None
-    test_user = payload.auth_user or ""
-    test_pass = payload.auth_pass or ""
-    if test_pass == "••••••••":
-        _, test_pass = get_auth_credentials()
-    if test_user and test_pass:
-        auth = httpx.BasicAuth(test_user, test_pass)
-
     try:
-        async with httpx.AsyncClient(auth=auth) as client:
+        async with httpx.AsyncClient() as client:
             resp = await client.get(f"{url}/system_stats", timeout=5.0)
-            if resp.status_code == 401:
-                return {"status": "error", "url": url, "message": "Auth rechazada (401)"}
             if resp.status_code == 200:
                 stats = resp.json()
                 vram = stats.get("devices", [{}])[0].get("vram_total", 0)
@@ -435,7 +418,7 @@ async def health_check():
     comfy_url = get_comfyui_url()
     comfy_status = "unknown"
     try:
-        async with httpx.AsyncClient(auth=get_comfyui_auth()) as client:
+        async with httpx.AsyncClient() as client:
             response = await client.get(f"{comfy_url}/system_stats", timeout=5.0)
             comfy_status = "ok" if response.status_code == 200 else "error"
     except Exception as e:
@@ -448,7 +431,7 @@ async def health_check():
 async def get_models():
     comfy_url = get_comfyui_url()
     try:
-        async with httpx.AsyncClient(auth=get_comfyui_auth()) as client:
+        async with httpx.AsyncClient() as client:
             response = await client.get(
                 f"{comfy_url}/object_info/CheckpointLoaderSimple", timeout=5.0
             )
@@ -524,7 +507,7 @@ async def txt2img(request: GenerationRequest):
         )
         print(f"Generating with seed={actual_seed}")
 
-        async with httpx.AsyncClient(auth=get_comfyui_auth()) as client:
+        async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{comfy_url}/prompt",
                 json={"prompt": workflow},
@@ -565,7 +548,7 @@ _saved_jobs: set = set()
 async def get_job_status(job_id: str):
     comfy_url = get_comfyui_url()
     try:
-        async with httpx.AsyncClient(auth=get_comfyui_auth()) as client:
+        async with httpx.AsyncClient() as client:
             queue_resp = await client.get(f"{comfy_url}/queue", timeout=5.0)
             if queue_resp.status_code == 200:
                 queue_data = queue_resp.json()
