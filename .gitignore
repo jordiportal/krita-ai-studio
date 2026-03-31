@@ -1,0 +1,9 @@
+node_modules/
+dist/
+frontend/dist/
+.angular/
+*.pyc
+__pycache__/
+.env
+*.db
+.DS_Store

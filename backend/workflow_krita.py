@@ -1,0 +1,322 @@
+"""
+Workflow generator que replica EXACTAMENTE el comportamiento de krita-ai-diffusion.
+
+Trazado del código fuente del plugin:
+  workflow.py:generate() → comfy_workflow.py:sampler_custom_advanced()
+
+Para Illustrious (Arch.illu, epsilon prediction):
+  - Sampler: euler_ancestral (preset "Alternative - Euler A")
+  - Scheduler: normal
+  - Steps: 24
+  - CFG: 5.0
+  - Style prompt: "{prompt}, masterpiece, best quality, recent, newest, absurdres, highres"
+  - Negative prompt: "nsfw, explicit, worst quality, ..."
+  - RescaleCFG: NO (solo para illu_v / v-prediction)
+  - Nodos: SamplerCustomAdvanced + CFGGuider + BasicScheduler + RandomNoise + KSamplerSelect
+  - Latent: EmptyLatentImage (no EmptySD3LatentImage)
+  - Decode: VAEDecode
+  - Output: ETN_SaveImageCache
+"""
+
+from typing import Dict, Any
+
+
+MODEL_CONFIGS = {
+    "illustrious": {
+        "sampler": "euler_ancestral",
+        "scheduler": "normal",
+        "steps": 24,
+        "cfg": 5.0,
+        "style_prompt": "{prompt}, masterpiece, best quality, recent, newest, absurdres, highres",
+        "negative_prompt": "nsfw, explicit, worst quality, worst aesthetic, bad quality, average quality, oldest, old, very displeasing, displeasing",
+        "rescale_cfg": False,
+        "is_flux": False,
+        "is_sd3": False,
+    },
+    "sdxl": {
+        "sampler": "dpmpp_2m",
+        "scheduler": "karras",
+        "steps": 20,
+        "cfg": 7.0,
+        "style_prompt": "{prompt}",
+        "negative_prompt": "",
+        "rescale_cfg": False,
+        "is_flux": False,
+        "is_sd3": False,
+    },
+    "flux": {
+        "sampler": "euler",
+        "scheduler": "simple",
+        "steps": 20,
+        "cfg": 1.0,
+        "style_prompt": "{prompt}",
+        "negative_prompt": "",
+        "rescale_cfg": False,
+        "is_flux": True,
+        "is_sd3": False,
+    },
+    "sd3": {
+        "sampler": "dpmpp_2m",
+        "scheduler": "sgm_uniform",
+        "steps": 24,
+        "cfg": 5.0,
+        "style_prompt": "{prompt}",
+        "negative_prompt": "",
+        "rescale_cfg": False,
+        "is_flux": False,
+        "is_sd3": True,
+    },
+    "sd15": {
+        "sampler": "dpmpp_2m",
+        "scheduler": "karras",
+        "steps": 20,
+        "cfg": 7.0,
+        "style_prompt": "{prompt}",
+        "negative_prompt": "",
+        "rescale_cfg": False,
+        "is_flux": False,
+        "is_sd3": False,
+    },
+}
+
+
+def detect_model_type(checkpoint_name: str) -> str:
+    name = checkpoint_name.lower()
+    if "illustrious" in name or "illu" in name or "noobai" in name:
+        return "illustrious"
+    if "flux" in name:
+        return "flux"
+    if "sd3" in name or "stable_diffusion_3" in name:
+        return "sd3"
+    if "xl" in name or "sdxl" in name:
+        return "sdxl"
+    return "sd15"
+
+
+def create_txt2img_workflow_krita(
+    prompt: str,
+    negative_prompt: str = "",
+    checkpoint: str = "SDXL.safetensors",
+    sampler: str = "",
+    scheduler: str = "",
+    steps: int = 0,
+    cfg: float = 0,
+    seed: int = -1,
+    width: int = 1024,
+    height: int = 1024,
+    batch_size: int = 1,
+) -> Dict[str, Any]:
+    """
+    Crea un workflow txt2img que replica EXACTAMENTE el de krita-ai-diffusion.
+
+    Si no se pasan sampler/scheduler/steps/cfg, se usan los del estilo del modelo.
+    """
+
+    model_type = detect_model_type(checkpoint)
+    config = MODEL_CONFIGS.get(model_type, MODEL_CONFIGS["sdxl"])
+
+    actual_sampler = sampler if sampler else config["sampler"]
+    actual_scheduler = scheduler if scheduler else config["scheduler"]
+    actual_steps = steps if steps > 0 else config["steps"]
+    actual_cfg = cfg if cfg > 0 else config["cfg"]
+    is_flux = config["is_flux"]
+    is_sd3 = config["is_sd3"]
+
+    final_prompt = config["style_prompt"].replace("{prompt}", prompt)
+    final_negative = negative_prompt if negative_prompt else config["negative_prompt"]
+
+    workflow: Dict[str, Any] = {}
+    node_id = 1
+
+    # ── 1. CheckpointLoaderSimple ──
+    checkpoint_id = str(node_id)
+    workflow[checkpoint_id] = {
+        "_meta": {"title": "Checkpoint"},
+        "inputs": {"ckpt_name": checkpoint},
+        "class_type": "CheckpointLoaderSimple",
+    }
+    model_ref = [checkpoint_id, 0]
+    clip_ref = [checkpoint_id, 1]
+    vae_ref = [checkpoint_id, 2]
+    node_id += 1
+
+    # ── 2. CLIPTextEncode (Positive) ──
+    positive_id = str(node_id)
+    workflow[positive_id] = {
+        "_meta": {"title": "Positive Prompt"},
+        "inputs": {
+            "text": final_prompt,
+            "clip": clip_ref,
+        },
+        "class_type": "CLIPTextEncode",
+    }
+    positive_ref = [positive_id, 0]
+    node_id += 1
+
+    # ── 3. CLIPTextEncode (Negative) / ConditioningZeroOut ──
+    if final_negative and final_negative.strip() and not is_flux:
+        negative_id = str(node_id)
+        workflow[negative_id] = {
+            "_meta": {"title": "Negative Prompt"},
+            "inputs": {
+                "text": final_negative,
+                "clip": clip_ref,
+            },
+            "class_type": "CLIPTextEncode",
+        }
+        negative_ref = [negative_id, 0]
+        node_id += 1
+    else:
+        negative_id = str(node_id)
+        workflow[negative_id] = {
+            "_meta": {"title": "Zero Conditioning"},
+            "inputs": {
+                "conditioning": positive_ref,
+            },
+            "class_type": "ConditioningZeroOut",
+        }
+        negative_ref = [negative_id, 0]
+        node_id += 1
+
+    # ── 4. EmptyLatentImage ──
+    latent_id = str(node_id)
+    if is_flux or is_sd3:
+        workflow[latent_id] = {
+            "_meta": {"title": "Empty Latent"},
+            "inputs": {"width": width, "height": height, "batch_size": batch_size},
+            "class_type": "EmptySD3LatentImage",
+        }
+    else:
+        workflow[latent_id] = {
+            "_meta": {"title": "Empty Latent"},
+            "inputs": {"width": width, "height": height, "batch_size": batch_size},
+            "class_type": "EmptyLatentImage",
+        }
+    latent_ref = [latent_id, 0]
+    node_id += 1
+
+    # ── 5. RandomNoise ──
+    noise_id = str(node_id)
+    workflow[noise_id] = {
+        "_meta": {"title": "Random Noise"},
+        "inputs": {"noise_seed": seed},
+        "class_type": "RandomNoise",
+    }
+    noise_ref = [noise_id, 0]
+    node_id += 1
+
+    # ── 6. KSamplerSelect ──
+    sampler_select_id = str(node_id)
+    workflow[sampler_select_id] = {
+        "_meta": {"title": "Sampler"},
+        "inputs": {"sampler_name": actual_sampler},
+        "class_type": "KSamplerSelect",
+    }
+    sampler_ref = [sampler_select_id, 0]
+    node_id += 1
+
+    # ── 7. BasicScheduler ──
+    scheduler_id = str(node_id)
+    workflow[scheduler_id] = {
+        "_meta": {"title": "Scheduler"},
+        "inputs": {
+            "model": model_ref,
+            "scheduler": actual_scheduler,
+            "steps": actual_steps,
+            "denoise": 1.0,
+        },
+        "class_type": "BasicScheduler",
+    }
+    sigmas_ref = [scheduler_id, 0]
+    node_id += 1
+
+    # ── 8. Guider (CFGGuider para modelos con CFG, BasicGuider para Flux) ──
+    guider_id = str(node_id)
+    if is_flux:
+        flux_guid_id = str(node_id)
+        workflow[flux_guid_id] = {
+            "_meta": {"title": "Flux Guidance"},
+            "inputs": {
+                "conditioning": positive_ref,
+                "guidance": 3.5 if actual_cfg <= 1 else actual_cfg,
+            },
+            "class_type": "FluxGuidance",
+        }
+        flux_positive_ref = [flux_guid_id, 0]
+        node_id += 1
+
+        guider_id = str(node_id)
+        workflow[guider_id] = {
+            "_meta": {"title": "Guider"},
+            "inputs": {
+                "model": model_ref,
+                "conditioning": flux_positive_ref,
+            },
+            "class_type": "BasicGuider",
+        }
+    elif actual_cfg == 1.0:
+        workflow[guider_id] = {
+            "_meta": {"title": "Guider"},
+            "inputs": {
+                "model": model_ref,
+                "conditioning": positive_ref,
+            },
+            "class_type": "BasicGuider",
+        }
+    else:
+        workflow[guider_id] = {
+            "_meta": {"title": "CFG Guider"},
+            "inputs": {
+                "model": model_ref,
+                "positive": positive_ref,
+                "negative": negative_ref,
+                "cfg": actual_cfg,
+            },
+            "class_type": "CFGGuider",
+        }
+    guider_ref = [guider_id, 0]
+    node_id += 1
+
+    # ── 9. SamplerCustomAdvanced ──
+    sampler_adv_id = str(node_id)
+    workflow[sampler_adv_id] = {
+        "_meta": {"title": "Sampler Advanced"},
+        "inputs": {
+            "noise": noise_ref,
+            "guider": guider_ref,
+            "sampler": sampler_ref,
+            "sigmas": sigmas_ref,
+            "latent_image": latent_ref,
+        },
+        "class_type": "SamplerCustomAdvanced",
+    }
+    # SamplerCustomAdvanced output[0]=output, output[1]=denoised_output
+    # Krita usa output[1] (denoised_output) para VAEDecode
+    sampler_output_ref = [sampler_adv_id, 1]
+    node_id += 1
+
+    # ── 10. VAEDecode ──
+    decode_id = str(node_id)
+    workflow[decode_id] = {
+        "_meta": {"title": "VAE Decode"},
+        "inputs": {
+            "samples": sampler_output_ref,
+            "vae": vae_ref,
+        },
+        "class_type": "VAEDecode",
+    }
+    image_ref = [decode_id, 0]
+    node_id += 1
+
+    # ── 11. ETN_SaveImageCache ──
+    cache_id = str(node_id)
+    workflow[cache_id] = {
+        "_meta": {"title": "Save to Cache"},
+        "inputs": {
+            "images": image_ref,
+            "format": "PNG",
+        },
+        "class_type": "ETN_SaveImageCache",
+    }
+
+    return workflow

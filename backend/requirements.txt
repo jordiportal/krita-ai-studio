@@ -1,0 +1,8 @@
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+httpx==0.25.2
+python-multipart==0.0.6
+pydantic==2.5.0
+Pillow==10.1.0
+numpy==1.26.2
+websockets==12.0
