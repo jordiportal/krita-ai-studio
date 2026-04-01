@@ -107,4 +107,16 @@ export class GenerationService {
   deleteCacheItem(id: string): Observable<any> {
     return this.http.delete(`${this.apiUrl}/cache/${id}`);
   }
+
+  getCivitaiVersionImages(versionId: number, limit: number = 20): Observable<any> {
+    return this.http.get(`${this.apiUrl}/civitai/version-images/${versionId}?limit=${limit}`);
+  }
+
+  browseCivitaiImages(params: Record<string, string | number>): Observable<any> {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== '' && v !== undefined && v !== 0) qs.set(k, String(v));
+    }
+    return this.http.get(`${this.apiUrl}/civitai/images?${qs.toString()}`);
+  }
 }

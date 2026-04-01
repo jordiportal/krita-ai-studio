@@ -403,7 +403,8 @@ import {
       <!-- ============ MODELS TAB ============ -->
       <ng-container *ngIf="activeTab === 'models'">
         <div class="sub-tabs">
-          <button class="sub-tab" [class.active]="modelsView === 'search'" (click)="modelsView = 'search'">Buscar</button>
+          <button class="sub-tab" [class.active]="modelsView === 'search'" (click)="modelsView = 'search'">Modelos</button>
+          <button class="sub-tab" [class.active]="modelsView === 'images'" (click)="modelsView = 'images'; handleBrowseImages()">Im&aacute;genes</button>
           <button class="sub-tab" [class.active]="modelsView === 'cache'" (click)="modelsView = 'cache'; loadCache()">
             Descargados
             <span class="sub-tab-badge" *ngIf="cacheItems.length > 0">{{ cacheItems.length }}</span>
@@ -464,6 +465,49 @@ import {
                   (click)="handleCivitaiLoadMore()">Cargar m&aacute;s</button>
         </ng-container>
 
+        <!-- IMAGES BROWSER -->
+        <ng-container *ngIf="modelsView === 'images'">
+          <div class="images-filters">
+            <select class="select-field filter-select" [(ngModel)]="imgBrowseSort" (ngModelChange)="handleBrowseImages(true)">
+              <option value="Most Reactions">Populares</option>
+              <option value="Most Comments">Comentadas</option>
+              <option value="Newest">Recientes</option>
+            </select>
+            <select class="select-field filter-select" [(ngModel)]="imgBrowsePeriod" (ngModelChange)="handleBrowseImages(true)">
+              <option value="Day">Hoy</option>
+              <option value="Week">Semana</option>
+              <option value="Month">Mes</option>
+              <option value="Year">A&ntilde;o</option>
+              <option value="AllTime">Siempre</option>
+            </select>
+          </div>
+
+          <div *ngIf="imgBrowseLoading && imgBrowseResults.length === 0" class="gallery-loading"><span class="spinner"></span></div>
+
+          <div class="images-grid" *ngIf="imgBrowseResults.length > 0">
+            <div class="images-grid-item" *ngFor="let img of imgBrowseResults"
+                 (click)="handleOpenBrowsedImage(img)" tabindex="0" role="button"
+                 aria-label="Ver detalles de generaci&oacute;n">
+              <img [src]="getImageThumbUrl(img)" [alt]="img.username" loading="lazy">
+              <div class="images-grid-overlay">
+                <span class="img-stat" *ngIf="img.stats?.heartCount">&#9829; {{ img.stats.heartCount }}</span>
+                <span class="img-stat" *ngIf="img.stats?.likeCount">&#128077; {{ img.stats.likeCount }}</span>
+                <span class="img-stat" *ngIf="img.stats?.commentCount">&#128172; {{ img.stats.commentCount }}</span>
+              </div>
+              <div class="images-grid-base" *ngIf="img.baseModel">{{ img.baseModel }}</div>
+            </div>
+          </div>
+
+          <div *ngIf="imgBrowseResults.length === 0 && !imgBrowseLoading" class="empty-gallery">
+            <p>Sin im&aacute;genes</p>
+          </div>
+
+          <button *ngIf="imgBrowseHasMore && !imgBrowseLoading"
+                  class="btn btn-secondary load-more-btn"
+                  (click)="handleBrowseImagesMore()">Cargar m&aacute;s</button>
+          <div *ngIf="imgBrowseLoading && imgBrowseResults.length > 0" class="gallery-loading"><span class="spinner"></span></div>
+        </ng-container>
+
         <!-- CACHE -->
         <ng-container *ngIf="modelsView === 'cache'">
           <div *ngIf="cacheItems.length === 0 && !cacheLoading" class="empty-gallery">
@@ -508,7 +552,10 @@ import {
 
             <ng-container *ngIf="modelDetail && !modelDetailLoading">
               <div class="model-detail-images" *ngIf="getDetailImages().length > 0">
-                <img *ngFor="let img of getDetailImages().slice(0, 4)" [src]="img" loading="lazy" class="model-detail-img">
+                <img *ngFor="let img of getDetailImages().slice(0, 6)" [src]="img" loading="lazy"
+                     class="model-detail-img clickable-img"
+                     (click)="handleOpenImageMeta(img)"
+                     tabindex="0" role="button" aria-label="Ver detalles de generaci&oacute;n">
               </div>
 
               <div class="model-detail-info">
@@ -556,6 +603,118 @@ import {
                 </div>
               </div>
             </ng-container>
+          </div>
+        </div>
+
+        <!-- IMAGE META OVERLAY -->
+        <div class="image-meta-overlay" *ngIf="imageMetaOpen" (click)="imageMetaOpen = false">
+          <div class="image-meta-panel" (click)="$event.stopPropagation()">
+            <div class="image-meta-header">
+              <button class="viewer-close" (click)="imageMetaOpen = false">&#10005;</button>
+              <h3>Detalles de generaci&oacute;n</h3>
+            </div>
+
+            <div *ngIf="imageMetaLoading" class="gallery-loading"><span class="spinner"></span></div>
+
+            <ng-container *ngIf="!imageMetaLoading && imageMetaData">
+              <div class="image-meta-preview">
+                <img [src]="imageMetaUrl" loading="lazy">
+              </div>
+
+              <div class="image-meta-grid">
+                <div class="meta-item" *ngIf="imageMetaData.baseModel">
+                  <label>Base Model</label>
+                  <span>{{ imageMetaData.baseModel }}</span>
+                </div>
+                <div class="meta-item" *ngIf="imageMetaData.meta?.Model">
+                  <label>Modelo</label>
+                  <span>{{ imageMetaData.meta.Model }}</span>
+                </div>
+                <div class="meta-item" *ngIf="imageMetaData.meta?.sampler">
+                  <label>Sampler</label>
+                  <span>{{ imageMetaData.meta.sampler }}</span>
+                </div>
+                <div class="meta-item" *ngIf="imageMetaData.meta?.steps">
+                  <label>Steps</label>
+                  <span>{{ imageMetaData.meta.steps }}</span>
+                </div>
+                <div class="meta-item" *ngIf="imageMetaData.meta?.cfgScale">
+                  <label>CFG Scale</label>
+                  <span>{{ imageMetaData.meta.cfgScale }}</span>
+                </div>
+                <div class="meta-item" *ngIf="imageMetaData.meta?.seed">
+                  <label>Seed</label>
+                  <span class="seed-value">{{ imageMetaData.meta.seed }}</span>
+                </div>
+                <div class="meta-item" *ngIf="imageMetaData.meta?.Size || (imageMetaData.meta?.width && imageMetaData.meta?.height)">
+                  <label>Tama&ntilde;o</label>
+                  <span>{{ imageMetaData.meta.Size || (imageMetaData.meta.width + 'x' + imageMetaData.meta.height) }}</span>
+                </div>
+                <div class="meta-item" *ngIf="imageMetaData.meta?.clipSkip">
+                  <label>Clip Skip</label>
+                  <span>{{ imageMetaData.meta.clipSkip }}</span>
+                </div>
+                <div class="meta-item" *ngIf="imageMetaData.meta?.['Denoising strength']">
+                  <label>Denoise</label>
+                  <span>{{ imageMetaData.meta['Denoising strength'] }}</span>
+                </div>
+                <div class="meta-item" *ngIf="imageMetaData.meta?.['Hires upscaler']">
+                  <label>HiRes Upscaler</label>
+                  <span>{{ imageMetaData.meta['Hires upscaler'] }}</span>
+                </div>
+                <div class="meta-item" *ngIf="imageMetaData.meta?.['Hires upscale']">
+                  <label>HiRes Scale</label>
+                  <span>{{ imageMetaData.meta['Hires upscale'] }}x</span>
+                </div>
+                <div class="meta-item" *ngIf="imageMetaData.username">
+                  <label>Autor</label>
+                  <span>{{ imageMetaData.username }}</span>
+                </div>
+              </div>
+
+              <div class="image-meta-section" *ngIf="imageMetaData.meta?.prompt">
+                <label>Prompt</label>
+                <div class="meta-prompt-box">{{ imageMetaData.meta.prompt }}</div>
+                <button class="btn btn-secondary meta-copy-btn"
+                        (click)="handleCopyToClipboard(imageMetaData.meta.prompt)">
+                  Copiar prompt
+                </button>
+              </div>
+
+              <div class="image-meta-section" *ngIf="imageMetaData.meta?.negativePrompt">
+                <label>Negative Prompt</label>
+                <div class="meta-prompt-box negative">{{ imageMetaData.meta.negativePrompt }}</div>
+                <button class="btn btn-secondary meta-copy-btn"
+                        (click)="handleCopyToClipboard(imageMetaData.meta.negativePrompt)">
+                  Copiar negative
+                </button>
+              </div>
+
+              <div class="image-meta-section" *ngIf="getImageResources().length > 0">
+                <label>Recursos utilizados</label>
+                <div class="meta-resources">
+                  <div class="meta-resource" *ngFor="let r of getImageResources()">
+                    <span class="resource-type" [style.background]="getResourceColor(r.type)">{{ r.type }}</span>
+                    <span class="resource-name">{{ r.name }}</span>
+                    <span class="resource-weight" *ngIf="r.weight">{{ r.weight }}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="image-meta-section" *ngIf="!imageMetaData.meta?.prompt && !imageMetaData.meta?.sampler">
+                <p class="no-meta-msg">Esta imagen no tiene metadatos de generaci&oacute;n disponibles.</p>
+              </div>
+
+              <button class="btn btn-primary meta-use-btn"
+                      *ngIf="imageMetaData.meta?.prompt"
+                      (click)="handleUsePrompt(imageMetaData.meta)">
+                Usar este prompt
+              </button>
+            </ng-container>
+
+            <div *ngIf="!imageMetaLoading && !imageMetaData" class="no-meta-msg">
+              <p>No se encontraron metadatos para esta imagen.</p>
+            </div>
           </div>
         </div>
       </ng-container>
@@ -694,7 +853,7 @@ export class AppComponent implements OnInit, OnDestroy {
   loggingIn = false;
   isAuthEnabled = false;
 
-  modelsView: 'search' | 'cache' = 'search';
+  modelsView: 'search' | 'images' | 'cache' = 'search';
   civitaiQuery = '';
   civitaiType = '';
   civitaiSort = 'Most Downloaded';
@@ -709,6 +868,20 @@ export class AppComponent implements OnInit, OnDestroy {
   modelDetail: any = null;
   modelDetailLoading = false;
   selectedVersionIdx = 0;
+
+  imageMetaOpen = false;
+  imageMetaData: any = null;
+  imageMetaLoading = false;
+  imageMetaUrl = '';
+  private versionImagesCache: Record<number, any[]> = {};
+
+  imgBrowseSort = 'Most Reactions';
+  imgBrowsePeriod = 'Week';
+  imgBrowseResults: any[] = [];
+  imgBrowseLoading = false;
+  imgBrowseCursor = '';
+  imgBrowseHasMore = false;
+  private imgBrowseLoaded = false;
 
   cacheItems: CachedModel[] = [];
   cacheLoading = false;
@@ -1386,6 +1559,148 @@ export class AppComponent implements OnInit, OnDestroy {
     if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
     if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KB';
     return bytes + ' B';
+  }
+
+  // ─── Image Browser ────────────────────────────────────────────────
+
+  handleBrowseImages(reset = false) {
+    if (this.imgBrowseLoaded && !reset) return;
+    this.imgBrowseLoading = true;
+    if (reset) {
+      this.imgBrowseResults = [];
+      this.imgBrowseCursor = '';
+    }
+    this._doBrowseImages(false);
+  }
+
+  handleBrowseImagesMore() {
+    this.imgBrowseLoading = true;
+    this._doBrowseImages(true);
+  }
+
+  private _doBrowseImages(append: boolean) {
+    const params: Record<string, string | number> = {
+      sort: this.imgBrowseSort,
+      period: this.imgBrowsePeriod,
+      limit: 20,
+    };
+    if (this.imgBrowseCursor) {
+      params['cursor'] = this.imgBrowseCursor;
+    }
+    this.generationService.browseCivitaiImages(params).subscribe({
+      next: (data: any) => {
+        const items = data.items || [];
+        this.imgBrowseResults = append ? [...this.imgBrowseResults, ...items] : items;
+        const meta = data.metadata || {};
+        this.imgBrowseCursor = meta.nextCursor ? String(meta.nextCursor) : '';
+        this.imgBrowseHasMore = !!meta.nextCursor || !!meta.nextPage;
+        this.imgBrowseLoading = false;
+        this.imgBrowseLoaded = true;
+      },
+      error: () => {
+        this.imgBrowseLoading = false;
+        this.showToast('Error cargando imágenes', 'error');
+      },
+    });
+  }
+
+  handleOpenBrowsedImage(img: any) {
+    this.imageMetaOpen = true;
+    this.imageMetaLoading = false;
+    this.imageMetaData = img;
+    this.imageMetaUrl = img.url || '';
+  }
+
+  getImageThumbUrl(img: any): string {
+    if (!img.url) return '';
+    return img.url.replace('/width=\\d+/', '/width=450/');
+  }
+
+  // ─── Image Meta Detail ─────────────────────────────────────────────
+
+  handleOpenImageMeta(imageUrl: string) {
+    this.imageMetaOpen = true;
+    this.imageMetaLoading = true;
+    this.imageMetaData = null;
+    this.imageMetaUrl = imageUrl;
+
+    const version = this.getSelectedVersion();
+    if (!version?.id) {
+      this.imageMetaLoading = false;
+      return;
+    }
+
+    const cached = this.versionImagesCache[version.id];
+    if (cached) {
+      this.imageMetaData = this.findImageByUrl(cached, imageUrl);
+      this.imageMetaLoading = false;
+      return;
+    }
+
+    this.generationService.getCivitaiVersionImages(version.id, 30).subscribe({
+      next: (res: any) => {
+        const items = res.items || [];
+        this.versionImagesCache[version.id] = items;
+        this.imageMetaData = this.findImageByUrl(items, imageUrl);
+        this.imageMetaLoading = false;
+      },
+      error: () => {
+        this.imageMetaLoading = false;
+        this.showToast('Error cargando metadatos', 'error');
+      },
+    });
+  }
+
+  private findImageByUrl(items: any[], targetUrl: string): any | null {
+    const targetUuid = this.extractUuidFromUrl(targetUrl);
+    if (!targetUuid) return items[0] || null;
+
+    const match = items.find(
+      (img: any) => img.url && this.extractUuidFromUrl(img.url) === targetUuid
+    );
+    return match || items[0] || null;
+  }
+
+  private extractUuidFromUrl(url: string): string {
+    const parts = url.split('/');
+    const uuid = parts.find(p => p.length >= 32 && p.includes('-'));
+    return uuid || '';
+  }
+
+  getImageResources(): any[] {
+    if (!this.imageMetaData?.meta?.resources) return [];
+    return this.imageMetaData.meta.resources.filter(
+      (r: any) => r.name && r.type
+    );
+  }
+
+  getResourceColor(type: string): string {
+    const t = (type || '').toLowerCase();
+    if (t === 'model' || t === 'checkpoint') return '#6366f1';
+    if (t === 'lora') return '#f59e0b';
+    if (t === 'embed' || t === 'embedding') return '#8b5cf6';
+    if (t === 'vae') return '#ec4899';
+    return '#6b7280';
+  }
+
+  handleCopyToClipboard(text: string) {
+    navigator.clipboard.writeText(text).then(
+      () => this.showToast('Copiado al portapapeles', 'success'),
+      () => this.showToast('Error al copiar', 'error')
+    );
+  }
+
+  handleUsePrompt(meta: any) {
+    if (meta.prompt) {
+      this.prompt = meta.prompt;
+    }
+    if (meta.negativePrompt) {
+      this.negativePrompt = meta.negativePrompt;
+    }
+    this.imageMetaOpen = false;
+    this.modelDetailOpen = false;
+    this.activeTab = 'generate';
+    this.showToast('Prompt aplicado', 'success');
   }
 
   // ─── NSFW Level Toggles ──────────────────────────────────────────────

@@ -314,6 +314,87 @@ async def civitai_model_detail(model_id: int):
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@router.get("/civitai/version-images/{version_id}")
+async def civitai_version_images(version_id: int, limit: int = 20):
+    """Fetch images with full generation metadata for a model version."""
+    return await _fetch_civitai_images(modelVersionId=version_id, limit=limit)
+
+
+@router.get("/civitai/images")
+async def civitai_browse_images(
+    sort: str = "Most Reactions",
+    period: str = "Week",
+    page: int = 0,
+    cursor: str = "",
+    limit: int = 20,
+    modelId: int = 0,
+    username: str = "",
+):
+    """Browse CivitAI images feed with filters."""
+    return await _fetch_civitai_images(
+        sort=sort, period=period, page=page, cursor=cursor,
+        limit=limit, modelId=modelId or None, username=username or None,
+    )
+
+
+async def _fetch_civitai_images(
+    *,
+    modelVersionId: int = 0,
+    modelId: Optional[int] = None,
+    username: Optional[str] = None,
+    sort: str = "",
+    period: str = "",
+    page: int = 0,
+    cursor: str = "",
+    limit: int = 20,
+) -> dict:
+    """Shared helper to query CivitAI /api/v1/images with content filtering."""
+    nsfw_level = _get_nsfw_level()
+    has_mature = nsfw_level & 0b11100
+
+    params: Dict[str, Any] = {"limit": min(limit, 100)}
+    if modelVersionId:
+        params["modelVersionId"] = modelVersionId
+    if modelId:
+        params["modelId"] = modelId
+    if username:
+        params["username"] = username
+    if sort:
+        params["sort"] = sort
+    if period:
+        params["period"] = period
+    if has_mature:
+        params["nsfw"] = "true"
+    if cursor:
+        params["cursor"] = cursor
+    elif page > 0:
+        params["page"] = page
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{CIVITAI_API}/images",
+                params=params,
+                headers=_civitai_headers(),
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                items = data.get("items", [])
+                if nsfw_level > 0:
+                    items = [
+                        img for img in items
+                        if (img.get("nsfwLevel", 1) & nsfw_level)
+                    ]
+                metadata = data.get("metadata", {})
+                return {"items": items, "metadata": metadata}
+            return {
+                "items": [], "metadata": {},
+                "error": f"CivitAI HTTP {resp.status_code}",
+            }
+    except Exception as e:
+        return {"items": [], "metadata": {}, "error": str(e)}
+
+
 # ─── Download Endpoints ──────────────────────────────────────────────────────
 
 @router.post("/civitai/download")
