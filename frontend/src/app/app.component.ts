@@ -488,7 +488,12 @@ import {
             <div class="images-grid-item" *ngFor="let img of imgBrowseResults"
                  (click)="handleOpenBrowsedImage(img)" tabindex="0" role="button"
                  aria-label="Ver detalles de generaci&oacute;n">
-              <img [src]="getImageThumbUrl(img)" [alt]="img.username" loading="lazy">
+              <video *ngIf="img.type === 'video'" [src]="img.url"
+                     muted loop playsinline preload="metadata"
+                     (mouseenter)="handleVideoHover($event, true)"
+                     (mouseleave)="handleVideoHover($event, false)"></video>
+              <img *ngIf="img.type !== 'video'" [src]="getImageThumbUrl(img)" [alt]="img.username" loading="lazy">
+              <div class="video-badge" *ngIf="img.type === 'video'">&#9654; Video</div>
               <div class="images-grid-overlay">
                 <span class="img-stat" *ngIf="img.stats?.heartCount">&#9829; {{ img.stats.heartCount }}</span>
                 <span class="img-stat" *ngIf="img.stats?.likeCount">&#128077; {{ img.stats.likeCount }}</span>
@@ -606,117 +611,6 @@ import {
           </div>
         </div>
 
-        <!-- IMAGE META OVERLAY -->
-        <div class="image-meta-overlay" *ngIf="imageMetaOpen" (click)="imageMetaOpen = false">
-          <div class="image-meta-panel" (click)="$event.stopPropagation()">
-            <div class="image-meta-header">
-              <button class="viewer-close" (click)="imageMetaOpen = false">&#10005;</button>
-              <h3>Detalles de generaci&oacute;n</h3>
-            </div>
-
-            <div *ngIf="imageMetaLoading" class="gallery-loading"><span class="spinner"></span></div>
-
-            <ng-container *ngIf="!imageMetaLoading && imageMetaData">
-              <div class="image-meta-preview">
-                <img [src]="imageMetaUrl" loading="lazy">
-              </div>
-
-              <div class="image-meta-grid">
-                <div class="meta-item" *ngIf="imageMetaData.baseModel">
-                  <label>Base Model</label>
-                  <span>{{ imageMetaData.baseModel }}</span>
-                </div>
-                <div class="meta-item" *ngIf="imageMetaData.meta?.Model">
-                  <label>Modelo</label>
-                  <span>{{ imageMetaData.meta.Model }}</span>
-                </div>
-                <div class="meta-item" *ngIf="imageMetaData.meta?.sampler">
-                  <label>Sampler</label>
-                  <span>{{ imageMetaData.meta.sampler }}</span>
-                </div>
-                <div class="meta-item" *ngIf="imageMetaData.meta?.steps">
-                  <label>Steps</label>
-                  <span>{{ imageMetaData.meta.steps }}</span>
-                </div>
-                <div class="meta-item" *ngIf="imageMetaData.meta?.cfgScale">
-                  <label>CFG Scale</label>
-                  <span>{{ imageMetaData.meta.cfgScale }}</span>
-                </div>
-                <div class="meta-item" *ngIf="imageMetaData.meta?.seed">
-                  <label>Seed</label>
-                  <span class="seed-value">{{ imageMetaData.meta.seed }}</span>
-                </div>
-                <div class="meta-item" *ngIf="imageMetaData.meta?.Size || (imageMetaData.meta?.width && imageMetaData.meta?.height)">
-                  <label>Tama&ntilde;o</label>
-                  <span>{{ imageMetaData.meta.Size || (imageMetaData.meta.width + 'x' + imageMetaData.meta.height) }}</span>
-                </div>
-                <div class="meta-item" *ngIf="imageMetaData.meta?.clipSkip">
-                  <label>Clip Skip</label>
-                  <span>{{ imageMetaData.meta.clipSkip }}</span>
-                </div>
-                <div class="meta-item" *ngIf="imageMetaData.meta?.['Denoising strength']">
-                  <label>Denoise</label>
-                  <span>{{ imageMetaData.meta['Denoising strength'] }}</span>
-                </div>
-                <div class="meta-item" *ngIf="imageMetaData.meta?.['Hires upscaler']">
-                  <label>HiRes Upscaler</label>
-                  <span>{{ imageMetaData.meta['Hires upscaler'] }}</span>
-                </div>
-                <div class="meta-item" *ngIf="imageMetaData.meta?.['Hires upscale']">
-                  <label>HiRes Scale</label>
-                  <span>{{ imageMetaData.meta['Hires upscale'] }}x</span>
-                </div>
-                <div class="meta-item" *ngIf="imageMetaData.username">
-                  <label>Autor</label>
-                  <span>{{ imageMetaData.username }}</span>
-                </div>
-              </div>
-
-              <div class="image-meta-section" *ngIf="imageMetaData.meta?.prompt">
-                <label>Prompt</label>
-                <div class="meta-prompt-box">{{ imageMetaData.meta.prompt }}</div>
-                <button class="btn btn-secondary meta-copy-btn"
-                        (click)="handleCopyToClipboard(imageMetaData.meta.prompt)">
-                  Copiar prompt
-                </button>
-              </div>
-
-              <div class="image-meta-section" *ngIf="imageMetaData.meta?.negativePrompt">
-                <label>Negative Prompt</label>
-                <div class="meta-prompt-box negative">{{ imageMetaData.meta.negativePrompt }}</div>
-                <button class="btn btn-secondary meta-copy-btn"
-                        (click)="handleCopyToClipboard(imageMetaData.meta.negativePrompt)">
-                  Copiar negative
-                </button>
-              </div>
-
-              <div class="image-meta-section" *ngIf="getImageResources().length > 0">
-                <label>Recursos utilizados</label>
-                <div class="meta-resources">
-                  <div class="meta-resource" *ngFor="let r of getImageResources()">
-                    <span class="resource-type" [style.background]="getResourceColor(r.type)">{{ r.type }}</span>
-                    <span class="resource-name">{{ r.name }}</span>
-                    <span class="resource-weight" *ngIf="r.weight">{{ r.weight }}</span>
-                  </div>
-                </div>
-              </div>
-
-              <div class="image-meta-section" *ngIf="!imageMetaData.meta?.prompt && !imageMetaData.meta?.sampler">
-                <p class="no-meta-msg">Esta imagen no tiene metadatos de generaci&oacute;n disponibles.</p>
-              </div>
-
-              <button class="btn btn-primary meta-use-btn"
-                      *ngIf="imageMetaData.meta?.prompt"
-                      (click)="handleUsePrompt(imageMetaData.meta)">
-                Usar este prompt
-              </button>
-            </ng-container>
-
-            <div *ngIf="!imageMetaLoading && !imageMetaData" class="no-meta-msg">
-              <p>No se encontraron metadatos para esta imagen.</p>
-            </div>
-          </div>
-        </div>
       </ng-container>
 
       <!-- ============ FULLSCREEN VIEWER ============ -->
@@ -731,6 +625,7 @@ import {
           <button class="viewer-close" (click)="handleCloseViewer()" aria-label="Cerrar">&#10005;</button>
           <div class="viewer-counter">{{ viewerIndex + 1 }} / {{ viewerItems.length }}</div>
           <div class="viewer-actions">
+            <button class="viewer-action-btn" (click)="handleOpenMetaFromViewer($event)" aria-label="Detalles">&#9432;</button>
             <button class="viewer-action-btn" (click)="handleDownloadViewer($event)" aria-label="Descargar">&#8595;</button>
             <button
               class="viewer-action-btn viewer-delete"
@@ -765,6 +660,112 @@ import {
             {{ viewerItems[viewerIndex]?.checkpoint }} &middot;
             {{ viewerItems[viewerIndex]?.width }}&times;{{ viewerItems[viewerIndex]?.height }}
           </p>
+        </div>
+      </div>
+
+      <!-- ============ IMAGE META OVERLAY (Global) ============ -->
+      <div class="image-meta-overlay" *ngIf="imageMetaOpen" (click)="imageMetaOpen = false">
+        <div class="image-meta-panel" (click)="$event.stopPropagation()">
+          <div class="image-meta-header">
+            <button class="viewer-close" (click)="imageMetaOpen = false">&#10005;</button>
+            <h3>Detalles de generaci&oacute;n</h3>
+          </div>
+
+          <div *ngIf="imageMetaLoading" class="gallery-loading"><span class="spinner"></span></div>
+
+          <ng-container *ngIf="!imageMetaLoading && imageMetaData">
+            <div class="image-meta-preview">
+              <video *ngIf="imageMetaData?.type === 'video'" [src]="imageMetaUrl"
+                     controls autoplay loop muted playsinline></video>
+              <img *ngIf="imageMetaData?.type !== 'video'" [src]="imageMetaUrl" loading="lazy">
+            </div>
+
+            <div class="image-meta-grid">
+              <div class="meta-item" *ngIf="imageMetaData.baseModel">
+                <label>Base Model</label>
+                <span>{{ imageMetaData.baseModel }}</span>
+              </div>
+              <div class="meta-item" *ngIf="imageMetaData.meta?.Model">
+                <label>Modelo</label>
+                <span>{{ imageMetaData.meta.Model }}</span>
+              </div>
+              <div class="meta-item" *ngIf="imageMetaData.meta?.sampler">
+                <label>Sampler</label>
+                <span>{{ imageMetaData.meta.sampler }}</span>
+              </div>
+              <div class="meta-item" *ngIf="imageMetaData.meta?.steps">
+                <label>Steps</label>
+                <span>{{ imageMetaData.meta.steps }}</span>
+              </div>
+              <div class="meta-item" *ngIf="imageMetaData.meta?.cfgScale">
+                <label>CFG Scale</label>
+                <span>{{ imageMetaData.meta.cfgScale }}</span>
+              </div>
+              <div class="meta-item" *ngIf="imageMetaData.meta?.seed">
+                <label>Seed</label>
+                <span class="seed-value">{{ imageMetaData.meta.seed }}</span>
+              </div>
+              <div class="meta-item" *ngIf="imageMetaData.meta?.Size || (imageMetaData.meta?.width && imageMetaData.meta?.height)">
+                <label>Tama&ntilde;o</label>
+                <span>{{ imageMetaData.meta.Size || (imageMetaData.meta.width + 'x' + imageMetaData.meta.height) }}</span>
+              </div>
+              <div class="meta-item" *ngIf="imageMetaData.meta?.clipSkip">
+                <label>Clip Skip</label>
+                <span>{{ imageMetaData.meta.clipSkip }}</span>
+              </div>
+              <div class="meta-item" *ngIf="imageMetaData.meta?.['Denoising strength']">
+                <label>Denoise</label>
+                <span>{{ imageMetaData.meta['Denoising strength'] }}</span>
+              </div>
+              <div class="meta-item" *ngIf="imageMetaData.username">
+                <label>Autor</label>
+                <span>{{ imageMetaData.username }}</span>
+              </div>
+            </div>
+
+            <div class="image-meta-section" *ngIf="imageMetaData.meta?.prompt">
+              <label>Prompt</label>
+              <div class="meta-prompt-box">{{ imageMetaData.meta.prompt }}</div>
+              <button class="btn btn-secondary meta-copy-btn"
+                      (click)="handleCopyToClipboard(imageMetaData.meta.prompt)">
+                Copiar prompt
+              </button>
+            </div>
+
+            <div class="image-meta-section" *ngIf="imageMetaData.meta?.negativePrompt">
+              <label>Negative Prompt</label>
+              <div class="meta-prompt-box negative">{{ imageMetaData.meta.negativePrompt }}</div>
+              <button class="btn btn-secondary meta-copy-btn"
+                      (click)="handleCopyToClipboard(imageMetaData.meta.negativePrompt)">
+                Copiar negative
+              </button>
+            </div>
+
+            <div class="image-meta-section" *ngIf="getImageResources().length > 0">
+              <label>Recursos utilizados</label>
+              <div class="meta-resources">
+                <div class="meta-resource" *ngFor="let r of getImageResources()">
+                  <span class="resource-type" [style.background]="getResourceColor(r.type)">{{ r.type }}</span>
+                  <span class="resource-name">{{ r.name }}</span>
+                  <span class="resource-weight" *ngIf="r.weight">{{ r.weight }}</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="image-meta-section" *ngIf="!imageMetaData.meta?.prompt && !imageMetaData.meta?.sampler">
+              <p class="no-meta-msg">Esta imagen no tiene metadatos de generaci&oacute;n disponibles.</p>
+            </div>
+
+            <button class="btn btn-primary meta-use-btn"
+                    *ngIf="imageMetaData.meta?.prompt"
+                    (click)="handleUsePrompt(imageMetaData.meta)">
+              Usar este prompt
+            </button>
+          </ng-container>
+
+          <div *ngIf="!imageMetaLoading && !imageMetaData" class="no-meta-msg">
+            <p>No se encontraron metadatos para esta imagen.</p>
+          </div>
         </div>
       </div>
 
@@ -1147,6 +1148,48 @@ export class AppComponent implements OnInit, OnDestroy {
     this.viewerIndex = index;
     this.viewerImageSrc = this.viewerItems[index].src || '';
     this.viewerOpen = true;
+  }
+
+  handleOpenGalleryMeta(item: any) {
+    this.imageMetaOpen = true;
+    this.imageMetaLoading = true;
+    this.imageMetaData = null;
+    this.imageMetaUrl = this.getImageUrl(item.id);
+
+    this.generationService.getGalleryImageMeta(item.id).subscribe({
+      next: (res: any) => {
+        this.imageMetaData = res;
+        this.imageMetaLoading = false;
+      },
+      error: () => {
+        // Fallback to basic item data if API fails
+        this.imageMetaData = {
+          ...item,
+          url: this.getImageUrl(item.id),
+          meta: {
+            prompt: item.prompt || '',
+            negativePrompt: item.neg_prompt || '',
+            Model: item.checkpoint || '',
+            Size: `${item.width || 0}x${item.height || 0}`,
+            seed: item.seed || 0,
+            sampler: item.sampler || '',
+            scheduler: item.scheduler || '',
+            steps: item.steps || 0,
+            cfg: item.cfg || 0,
+            strength: item.strength || 0,
+          }
+        };
+        this.imageMetaLoading = false;
+      },
+    });
+  }
+
+  handleOpenMetaFromViewer(event: Event) {
+    event.stopPropagation();
+    const currentItem = this.viewerItems[this.viewerIndex];
+    if (!currentItem) return;
+    this.viewerOpen = false;
+    this.handleOpenGalleryMeta(currentItem);
   }
 
   handleViewLastResult(index: number) {
@@ -1613,7 +1656,13 @@ export class AppComponent implements OnInit, OnDestroy {
 
   getImageThumbUrl(img: any): string {
     if (!img.url) return '';
-    return img.url.replace('/width=\\d+/', '/width=450/');
+    if (img.type === 'video') return img.url;
+    return img.url.replace(/width=\d+/, 'width=450').replace('original=true', 'width=450');
+  }
+
+  handleVideoHover(event: Event, play: boolean) {
+    const el = event.target as HTMLVideoElement;
+    if (play) { el.play().catch(() => {}); } else { el.pause(); }
   }
 
   // ─── Image Meta Detail ─────────────────────────────────────────────
@@ -1697,10 +1746,35 @@ export class AppComponent implements OnInit, OnDestroy {
     if (meta.negativePrompt) {
       this.negativePrompt = meta.negativePrompt;
     }
+    // Copy additional parameters if available
+    if (meta.sampler || meta.Sampler) {
+      this.sampler = meta.sampler || meta.Sampler;
+      this.handleSaveSetting('sampler', this.sampler);
+    }
+    if (meta.steps || meta.Steps) {
+      this.steps = parseInt(meta.steps || meta.Steps, 10) || this.steps;
+      this.handleSaveSetting('steps', String(this.steps));
+    }
+    if (meta.cfg || meta.CFG || meta.cfgScale) {
+      this.cfg = parseFloat(meta.cfg || meta.CFG || meta.cfgScale) || this.cfg;
+      this.handleSaveSetting('cfg', String(this.cfg));
+    }
+    if (meta.strength || meta.Strength || meta.denoise) {
+      this.strength = parseFloat(meta.strength || meta.Strength || meta.denoise) || this.strength;
+      this.handleSaveSetting('strength', String(this.strength));
+    }
+    if (meta.Model || meta.model || meta.checkpoint) {
+      const modelName = meta.Model || meta.model || meta.checkpoint;
+      // Only set if model exists in available models
+      if (this.models.some(m => m.name === modelName)) {
+        this.selectedModel = modelName;
+        this.handleSaveSetting('checkpoint', modelName);
+      }
+    }
     this.imageMetaOpen = false;
     this.modelDetailOpen = false;
     this.activeTab = 'generate';
-    this.showToast('Prompt aplicado', 'success');
+    this.showToast('Prompt y parámetros aplicados', 'success');
   }
 
   // ─── NSFW Level Toggles ──────────────────────────────────────────────

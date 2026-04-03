@@ -119,4 +119,8 @@ export class GenerationService {
     }
     return this.http.get(`${this.apiUrl}/civitai/images?${qs.toString()}`);
   }
+
+  getGalleryImageMeta(imgId: string): Observable<any> {
+    return this.http.get(`${this.apiUrl}/gallery/${imgId}/meta`);
+  }
 }

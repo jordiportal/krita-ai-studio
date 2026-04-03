@@ -84,9 +84,41 @@ def init_db():
             width      INTEGER NOT NULL DEFAULT 0,
             height     INTEGER NOT NULL DEFAULT 0,
             filename   TEXT NOT NULL,
-            created_at REAL NOT NULL
+            created_at REAL NOT NULL,
+            seed       INTEGER NOT NULL DEFAULT 0,
+            sampler    TEXT NOT NULL DEFAULT '',
+            scheduler  TEXT NOT NULL DEFAULT '',
+            steps      INTEGER NOT NULL DEFAULT 0,
+            cfg        REAL NOT NULL DEFAULT 0,
+            strength   REAL NOT NULL DEFAULT 0
         )
     """)
+
+    # Migration: add missing columns to existing gallery table
+    try:
+        conn.execute("ALTER TABLE gallery ADD COLUMN seed INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        conn.execute("ALTER TABLE gallery ADD COLUMN sampler TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE gallery ADD COLUMN scheduler TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE gallery ADD COLUMN steps INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE gallery ADD COLUMN cfg REAL NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE gallery ADD COLUMN strength REAL NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
 
     setting_defaults = {
         "checkpoint": "novaAnimeXL_ilV125.safetensors",
@@ -225,6 +257,8 @@ def verify_token(token: str) -> dict | None:
 def save_gallery_image(
     image_bytes: bytes, prompt: str, neg_prompt: str,
     checkpoint: str, width: int, height: int,
+    seed: int = 0, sampler: str = "", scheduler: str = "",
+    steps: int = 0, cfg: float = 0.0, strength: float = 0.0,
 ) -> Dict[str, Any]:
     img_id = uuid.uuid4().hex[:12]
     filename = f"{img_id}.png"
@@ -234,15 +268,19 @@ def save_gallery_image(
     now = time.time()
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute(
-        "INSERT INTO gallery (id, prompt, neg_prompt, checkpoint, width, height, filename, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (img_id, prompt, neg_prompt, checkpoint, width, height, filename, now),
+        "INSERT INTO gallery (id, prompt, neg_prompt, checkpoint, width, height, filename, created_at, "
+        "seed, sampler, scheduler, steps, cfg, strength) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (img_id, prompt, neg_prompt, checkpoint, width, height, filename, now,
+         seed, sampler, scheduler, steps, cfg, strength),
     )
     conn.commit()
     conn.close()
     return {
         "id": img_id, "prompt": prompt, "checkpoint": checkpoint,
         "width": width, "height": height, "filename": filename, "created_at": now,
+        "seed": seed, "sampler": sampler, "scheduler": scheduler,
+        "steps": steps, "cfg": cfg, "strength": strength,
     }
 
 
@@ -574,6 +612,52 @@ async def api_delete_gallery(img_id: str):
     raise HTTPException(status_code=404, detail="Image not found")
 
 
+@app.get("/api/gallery/{img_id}/meta")
+async def api_gallery_image_meta(img_id: str):
+    """Get full generation metadata for a gallery image."""
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM gallery WHERE id = ?",
+        (img_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    data = dict(row)
+    # Format to match CivitAI meta structure for frontend reuse
+    # Use .get() with defaults for backward compatibility with old images
+    return {
+        "id": data.get("id", ""),
+        "url": f"/api/gallery/{img_id}/image",
+        "prompt": data.get("prompt", ""),
+        "neg_prompt": data.get("neg_prompt", ""),
+        "checkpoint": data.get("checkpoint", ""),
+        "width": data.get("width", 0),
+        "height": data.get("height", 0),
+        "seed": data.get("seed", 0),
+        "sampler": data.get("sampler", ""),
+        "scheduler": data.get("scheduler", ""),
+        "steps": data.get("steps", 0),
+        "cfg": data.get("cfg", 0),
+        "strength": data.get("strength", 0),
+        "created_at": data.get("created_at", 0),
+        "meta": {
+            "prompt": data.get("prompt", ""),
+            "negativePrompt": data.get("neg_prompt", ""),
+            "Model": data.get("checkpoint", ""),
+            "Size": f"{data.get('width', 0)}x{data.get('height', 0)}",
+            "seed": data.get("seed", 0),
+            "sampler": data.get("sampler", ""),
+            "scheduler": data.get("scheduler", ""),
+            "steps": data.get("steps", 0),
+            "cfg": data.get("cfg", 0),
+            "strength": data.get("strength") if data.get("strength") else None,
+        }
+    }
+
+
 # ─── Health / Models / Samplers ───────────────────────────────────────────────
 
 @app.get("/api/health")
@@ -690,6 +774,12 @@ async def txt2img(request: GenerationRequest):
                 "checkpoint": request.checkpoint or "",
                 "width": request.width,
                 "height": request.height,
+                "seed": actual_seed,
+                "sampler": request.sampler or "",
+                "scheduler": request.scheduler or "",
+                "steps": request.steps or 0,
+                "cfg": request.cfg_scale or 0.0,
+                "strength": request.strength or 0.0,
             }
 
             return GenerationResponse(job_id=prompt_id, status="queued", images=None)
@@ -803,6 +893,12 @@ async def get_job_status(job_id: str):
                                     checkpoint=meta.get("checkpoint", ""),
                                     width=meta.get("width", 0),
                                     height=meta.get("height", 0),
+                                    seed=meta.get("seed", 0),
+                                    sampler=meta.get("sampler", ""),
+                                    scheduler=meta.get("scheduler", ""),
+                                    steps=meta.get("steps", 0),
+                                    cfg=meta.get("cfg", 0.0),
+                                    strength=meta.get("strength", 0.0),
                                 )
                                 gallery_ids.append(entry["id"])
                             print(f"Saved {len(gallery_ids)} images to gallery")

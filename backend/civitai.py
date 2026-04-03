@@ -67,6 +67,27 @@ def _get_nsfw_level() -> int:
     return 31
 
 
+_NSFW_LABEL_MAP = {
+    "None": 1, "PG": 1, "Soft": 2, "PG-13": 2,
+    "Mature": 4, "R": 4, "X": 8, "XXX": 16,
+}
+
+
+def _parse_nsfw_level(raw) -> int:
+    """Parse nsfwLevel from CivitAI (int bitmask, string label, or absent)."""
+    if raw is None:
+        return 1
+    if isinstance(raw, int):
+        return raw
+    label = str(raw).strip()
+    if label in _NSFW_LABEL_MAP:
+        return _NSFW_LABEL_MAP[label]
+    try:
+        return int(label)
+    except (ValueError, TypeError):
+        return 1
+
+
 def _apply_content_filter(items: list, allowed: int) -> list:
     """Filter images within each model by nsfwLevel, like CivitAI does.
     Models are shown if they have at least one image matching the allowed
@@ -82,7 +103,7 @@ def _apply_content_filter(items: list, allowed: int) -> list:
             images = version.get("images") or []
             visible = [
                 img for img in images
-                if (img.get("nsfwLevel", 1) & allowed)
+                if (_parse_nsfw_level(img.get("nsfwLevel")) & allowed)
             ]
             version["images"] = visible
             if visible:
@@ -383,7 +404,7 @@ async def _fetch_civitai_images(
                 if nsfw_level > 0:
                     items = [
                         img for img in items
-                        if (img.get("nsfwLevel", 1) & nsfw_level)
+                        if (_parse_nsfw_level(img.get("nsfwLevel")) & nsfw_level)
                     ]
                 metadata = data.get("metadata", {})
                 return {"items": items, "metadata": metadata}
