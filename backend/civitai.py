@@ -18,6 +18,21 @@ router = APIRouter(prefix="/api")
 
 DB_PATH: Path = Path()
 MODELS_DIR: Path = Path()
+COMFYUI_URL: str = ""
+
+
+def get_comfyui_url() -> str:
+    """Obtiene la URL de ComfyUI desde la configuracion."""
+    import sqlite3
+    conn = sqlite3.connect(str(DB_PATH))
+    cursor = conn.execute("SELECT key, value FROM config WHERE key IN ('comfyui_host', 'comfyui_port', 'comfyui_secure')")
+    cfg = {row[0]: row[1] for row in cursor.fetchall()}
+    conn.close()
+
+    host = cfg.get("comfyui_host", "localhost")
+    port = cfg.get("comfyui_port", "8188")
+    secure = cfg.get("comfyui_secure", "false").lower() == "true"
+    return f"{'https' if secure else 'http'}://{host}:{port}"
 
 CIVITAI_API = "https://civitai.com/api/v1"
 
@@ -191,6 +206,42 @@ def _db_delete_cache(cache_id: str) -> Optional[dict]:
 
 
 # ─── Background download task ────────────────────────────────────────────────
+
+async def _poll_plugin_download(
+    cache_id: str,
+    plugin_download_id: str,
+    comfy_url: str,
+):
+    """Polling del progreso de descarga en el plugin ComfyUI."""
+    try:
+        async with httpx.AsyncClient() as client:
+            while True:
+                await asyncio.sleep(2)
+
+                try:
+                    resp = await client.get(
+                        f"{comfy_url}/api/kas/downloads/{plugin_download_id}",
+                        timeout=10.0,
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        download = data.get("download", {})
+
+                        status = download.get("status", "downloading")
+                        progress = download.get("progress", 0)
+
+                        _db_update_cache(cache_id, status=status, progress=progress)
+
+                        if status in ["completed", "error", "cancelled"]:
+                            break
+
+                except Exception:
+                    pass
+
+    except Exception as e:
+        print(f"[civitai] Error en polling de descarga: {e}")
+        _db_update_cache(cache_id, status="error", error=str(e))
+
 
 async def _download_task(
     download_id: str, url: str, save_path: Path,
@@ -420,11 +471,14 @@ async def _fetch_civitai_images(
 
 @router.post("/civitai/download")
 async def start_download(req: DownloadRequest):
+    """
+    Inicia descarga de modelo desde CivitAI.
+    Con el plugin comfyui-kas, redirige la descarga al servidor ComfyUI.
+    """
     download_id = uuid.uuid4().hex[:12]
-    subdir = TYPE_DIRS.get(req.type, "other")
     filename = req.filename or f"{req.name.replace(' ', '_')}.safetensors"
-    save_path = MODELS_DIR / subdir / filename
 
+    # Guardar registro en SQLite (metadatos, historial)
     entry = {
         "id": download_id,
         "civitai_model_id": req.civitai_model_id,
@@ -441,6 +495,52 @@ async def start_download(req: DownloadRequest):
     }
     _db_insert_cache(entry)
 
+    # Intentar usar el plugin comfyui-kas para descargar directamente en ComfyUI
+    comfy_url = get_comfyui_url()
+    civitai_key = _get_civitai_key()
+
+    try:
+        # Llamar al endpoint del plugin para iniciar descarga
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            payload = {
+                "download_url": req.download_url,
+                "filename": filename,
+                "type": req.type,
+                "civitai_model_id": req.civitai_model_id,
+                "civitai_version_id": req.civitai_version_id,
+                "api_key": civitai_key if civitai_key else None,
+            }
+            headers = {}
+            if civitai_key:
+                headers["X-Civitai-Api-Key"] = civitai_key
+
+            resp = await client.post(
+                f"{comfy_url}/api/kas/models/download",
+                json=payload,
+                headers=headers,
+            )
+
+            if resp.status_code == 200:
+                result = resp.json()
+                if result.get("status") == "ok":
+                    # El plugin acepto la descarga
+                    plugin_download_id = result.get("download", {}).get("id", download_id)
+                    _db_update_cache(download_id, status="downloading", progress=0)
+
+                    # Iniciar tarea de polling del progreso
+                    asyncio.create_task(
+                        _poll_plugin_download(download_id, plugin_download_id, comfy_url)
+                    )
+
+                    return {"download_id": download_id, "status": "started", "via_plugin": True}
+
+    except Exception as e:
+        print(f"[civitai] Plugin no disponible ({e}), usando descarga local fallback")
+
+    # Fallback: descarga local (comportamiento anterior)
+    subdir = TYPE_DIRS.get(req.type, "other")
+    save_path = MODELS_DIR / subdir / filename
+
     civitai_key = _get_civitai_key()
     asyncio.create_task(
         _download_task(
@@ -449,7 +549,7 @@ async def start_download(req: DownloadRequest):
         )
     )
 
-    return {"download_id": download_id, "status": "started"}
+    return {"download_id": download_id, "status": "started", "via_plugin": False}
 
 
 @router.get("/civitai/downloads")

@@ -6,6 +6,7 @@ import {
   ModelList,
   SamplerList,
   GenerationRequest,
+  GenerationVideoRequest,
   GenerationResponse,
   JobStatus,
   Settings,
@@ -13,6 +14,7 @@ import {
   ConnectionTestResult,
   GalleryResponse,
   CacheResponse,
+  InventoryResponse,
 } from './types';
 
 @Injectable({
@@ -60,6 +62,17 @@ export class GenerationService {
       `${this.apiUrl}/generate/txt2img`,
       request
     );
+  }
+
+  generateTxt2Video(request: GenerationVideoRequest): Observable<GenerationResponse> {
+    return this.http.post<GenerationResponse>(
+      `${this.apiUrl}/generate/txt2video`,
+      request
+    );
+  }
+
+  getVideoUrl(videoId: string): string {
+    return `${this.apiUrl}/video/${videoId}`;
   }
 
   getJobStatus(jobId: string): Observable<JobStatus> {
@@ -122,5 +135,13 @@ export class GenerationService {
 
   getGalleryImageMeta(imgId: string): Observable<any> {
     return this.http.get(`${this.apiUrl}/gallery/${imgId}/meta`);
+  }
+
+  getInventory(): Observable<InventoryResponse> {
+    return this.http.get<InventoryResponse>(`${this.apiUrl}/inventory`);
+  }
+
+  deleteInventoryModel(folder: string, filename: string): Observable<any> {
+    return this.http.delete(`${this.apiUrl}/inventory/${encodeURIComponent(folder)}/${encodeURIComponent(filename)}`);
   }
 }

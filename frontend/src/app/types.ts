@@ -32,10 +32,29 @@ export interface GenerationRequest {
   strength?: number;
 }
 
+export interface GenerationVideoRequest {
+  prompt: string;
+  negative_prompt?: string;
+  width: number;
+  height: number;
+  length: number;
+  fps: number;
+  steps: number;
+  cfg_scale: number;
+  sampler: string;
+  checkpoint?: string;
+  vae?: string;
+  clip?: string;
+  seed: number;
+}
+
 export interface GenerationResponse {
   job_id: string;
   status: string;
   images?: string[];
+  videos?: string[];
+  video_ids?: string[];
+  is_video?: boolean;
   error?: string;
 }
 
@@ -45,6 +64,9 @@ export interface JobStatus {
   progress?: number;
   error?: string;
   images?: string[];
+  videos?: string[];
+  video_ids?: string[];
+  is_video?: boolean;
 }
 
 export interface Settings {
@@ -129,4 +151,30 @@ export interface CacheResponse {
 export interface ModelTypeOption {
   label: string;
   value: string;
+}
+
+export interface InventoryItem {
+  filename: string;
+  folder: string;
+  size_bytes: number;
+  base_model: string;
+  from_civitai: boolean;
+  civitai_name: string | null;
+  civitai_model_id: number | null;
+}
+
+export interface InventoryCategory {
+  key: string;
+  label: string;
+  icon: string;
+  items: InventoryItem[];
+  count: number;
+  total_bytes: number;
+}
+
+export interface InventoryResponse {
+  categories: InventoryCategory[];
+  total_files: number;
+  total_bytes: number;
+  active_downloads: CachedModel[];
 }

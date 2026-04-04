@@ -5,8 +5,9 @@ import { Subscription } from 'rxjs';
 import { GenerationService } from './generation.service';
 import { AuthService } from './auth.service';
 import {
-  Model, GenerationRequest, Settings, ComfyConfig,
+  Model, GenerationRequest, GenerationVideoRequest, Settings, ComfyConfig,
   ConnectionTestResult, GalleryItem, CachedModel, ModelTypeOption,
+  InventoryCategory, InventoryItem,
 } from './types';
 
 @Component({
@@ -72,14 +73,51 @@ import {
             <textarea
               class="textarea-field"
               [(ngModel)]="prompt"
-              placeholder="Describe la imagen que quieres generar..."
+              placeholder="Describe la imagen o video que quieres generar..."
               rows="3"
               (keydown.meta.enter)="handleGenerate()"
               (keydown.control.enter)="handleGenerate()">
             </textarea>
           </div>
 
+          <!-- Generation Mode Selector -->
           <div class="input-group">
+            <label>Modo de generaci\u00f3n</label>
+            <div class="mode-selector">
+              <button
+                class="mode-btn"
+                [class.active]="generationMode === 'image'"
+                (click)="generationMode = 'image'">
+                \ud83d\uddbc\ufe0f Imagen
+              </button>
+              <button
+                class="mode-btn"
+                [class.active]="generationMode === 'video'"
+                (click)="generationMode = 'video'">
+                \ud83c\udfa5 Video
+              </button>
+            </div>
+          </div>
+
+          <!-- Video Settings (only in video mode) -->
+          <div class="input-group" *ngIf="generationMode === 'video'">
+            <label>Duraci\u00f3n: {{ videoLength }} frames</label>
+            <div class="slider-container">
+              <input type="range" min="21" max="161" step="4" [(ngModel)]="videoLength">
+              <span class="slider-value">{{ videoLength }}</span>
+            </div>
+            <span class="hint">~{{ (videoLength / videoFps).toFixed(1) }}s &#64; {{ videoFps }}fps</span>
+          </div>
+
+          <div class="input-group" *ngIf="generationMode === 'video'">
+            <label>FPS: {{ videoFps }}</label>
+            <div class="slider-container">
+              <input type="range" min="1" max="30" step="0.5" [(ngModel)]="videoFps">
+              <span class="slider-value">{{ videoFps }}</span>
+            </div>
+          </div>
+
+          <div class="input-group" *ngIf="generationMode === 'image'">
             <label>Strength: {{ strength }}</label>
             <div class="slider-container">
               <input type="range" min="0.1" max="1" step="0.05" [(ngModel)]="strength">
@@ -92,7 +130,7 @@ import {
             (click)="handleGenerate()"
             [disabled]="generating || !comfyOnline">
             <span *ngIf="generating" class="spinner"></span>
-            <span>{{ generating ? 'Generando...' : 'Generar Imagen' }}</span>
+            <span>{{ generating ? 'Generando...' : (generationMode === 'video' ? 'Generar Video' : 'Generar Imagen') }}</span>
           </button>
         </div>
 
@@ -174,7 +212,7 @@ import {
           </div>
         </div>
 
-        <!-- Last result -->
+        <!-- Last result - Images -->
         <div class="card" *ngIf="generatedImages.length > 0">
           <div class="last-result">
             <img
@@ -183,6 +221,29 @@ import {
               [alt]="'Generated ' + i"
               class="last-result-img"
               (click)="handleViewLastResult(i)">
+          </div>
+        </div>
+
+        <!-- Last result - Videos -->
+        <div class="card" *ngIf="generatedVideos.length > 0">
+          <h3 class="card-subtitle">Video generado</h3>
+          <div class="video-results">
+            <div *ngFor="let videoId of generatedVideos; let i = index" class="video-container">
+              <video
+                [src]="getVideoUrl(videoId)"
+                controls
+                autoplay
+                loop
+                muted
+                playsinline
+                class="generated-video">
+              </video>
+              <div class="video-actions">
+                <a [href]="getVideoUrl(videoId)" download class="btn btn-secondary btn-small">
+                  Descargar video
+                </a>
+              </div>
+            </div>
           </div>
         </div>
       </ng-container>
@@ -405,9 +466,8 @@ import {
         <div class="sub-tabs">
           <button class="sub-tab" [class.active]="modelsView === 'search'" (click)="modelsView = 'search'">Modelos</button>
           <button class="sub-tab" [class.active]="modelsView === 'images'" (click)="modelsView = 'images'; handleBrowseImages()">Im&aacute;genes</button>
-          <button class="sub-tab" [class.active]="modelsView === 'cache'" (click)="modelsView = 'cache'; loadCache()">
-            Descargados
-            <span class="sub-tab-badge" *ngIf="cacheItems.length > 0">{{ cacheItems.length }}</span>
+          <button class="sub-tab" [class.active]="modelsView === 'inventory'" (click)="modelsView = 'inventory'; loadInventory()">
+            Inventario
           </button>
         </div>
 
@@ -513,35 +573,75 @@ import {
           <div *ngIf="imgBrowseLoading && imgBrowseResults.length > 0" class="gallery-loading"><span class="spinner"></span></div>
         </ng-container>
 
-        <!-- CACHE -->
-        <ng-container *ngIf="modelsView === 'cache'">
-          <div *ngIf="cacheItems.length === 0 && !cacheLoading" class="empty-gallery">
-            <div class="empty-icon">&#128230;</div>
-            <p>Sin modelos descargados</p>
-            <p class="empty-sub">Busca y descarga modelos de CivitAI</p>
+        <!-- INVENTORY -->
+        <ng-container *ngIf="modelsView === 'inventory'">
+          <div *ngIf="inventoryLoading && inventoryCategories.length === 0" class="gallery-loading"><span class="spinner"></span></div>
+
+          <!-- Active downloads -->
+          <div class="inv-downloads" *ngIf="inventoryActiveDownloads.length > 0">
+            <div class="inv-downloads-title">Descargas activas</div>
+            <div class="cache-item" *ngFor="let dl of inventoryActiveDownloads">
+              <div class="cache-item-info">
+                <span class="cache-item-name">{{ dl.name }}</span>
+                <div class="cache-item-meta">
+                  <span class="model-type-badge small" [style.background]="getTypeColor(dl.type)">{{ dl.type }}</span>
+                  <span>{{ formatBytes(dl.size_bytes) }}</span>
+                </div>
+                <div class="cache-progress-bar">
+                  <div class="cache-progress-fill" [style.width.%]="dl.progress"></div>
+                </div>
+                <span class="cache-item-status">{{ dl.progress?.toFixed(0) }}%</span>
+              </div>
+            </div>
           </div>
 
-          <div *ngIf="cacheLoading && cacheItems.length === 0" class="gallery-loading"><span class="spinner"></span></div>
+          <!-- Storage summary -->
+          <div class="inv-summary" *ngIf="inventoryCategories.length > 0">
+            <span class="inv-summary-total">{{ inventoryTotalFiles }} archivos &middot; {{ formatBytes(inventoryTotalBytes) }}</span>
+          </div>
 
-          <div class="cache-list" *ngIf="cacheItems.length > 0">
-            <div class="cache-item" *ngFor="let item of cacheItems">
-              <div class="cache-item-info">
-                <span class="cache-item-name">{{ item.name }}</span>
-                <div class="cache-item-meta">
-                  <span class="model-type-badge small" [style.background]="getTypeColor(item.type)">{{ item.type }}</span>
-                  <span>{{ formatBytes(item.size_bytes) }}</span>
-                </div>
-                <div class="cache-progress-bar" *ngIf="item.status === 'downloading'">
-                  <div class="cache-progress-fill" [style.width.%]="item.progress"></div>
-                </div>
-                <span class="cache-item-status" *ngIf="item.status === 'downloading'">
-                  {{ item.progress?.toFixed(0) }}% &middot; {{ formatBytes(item.speed || 0) }}/s
-                </span>
-                <span class="cache-item-status error" *ngIf="item.status === 'error'">Error</span>
+          <!-- Filter -->
+          <div class="inv-filter" *ngIf="inventoryCategories.length > 0">
+            <input class="input-field" type="text" [(ngModel)]="inventoryFilter"
+                   placeholder="Filtrar por nombre...">
+          </div>
+
+          <!-- Categories -->
+          <div class="inv-categories" *ngIf="inventoryCategories.length > 0">
+            <div class="inv-category" *ngFor="let cat of inventoryCategories">
+              <div class="inv-category-header" (click)="handleToggleInventoryCategory(cat.key)"
+                   tabindex="0" role="button" aria-label="Expandir categor&iacute;a">
+                <span class="inv-category-arrow" [class.expanded]="!inventoryCollapsed[cat.key]">&#9654;</span>
+                <span class="inv-category-icon">{{ getInventoryIcon(cat.icon) }}</span>
+                <span class="inv-category-label">{{ cat.label }}</span>
+                <span class="inv-category-count">{{ getFilteredItems(cat).length }}</span>
+                <span class="inv-category-size">{{ formatBytes(cat.total_bytes) }}</span>
               </div>
-              <button class="cache-delete-btn" (click)="handleDeleteCacheItem(item.id)"
-                      aria-label="Eliminar" *ngIf="item.status !== 'downloading'">&#128465;</button>
+              <div class="inv-category-items" *ngIf="!inventoryCollapsed[cat.key]">
+                <div class="inv-item" *ngFor="let item of getFilteredItems(cat)">
+                  <div class="inv-item-info">
+                    <span class="inv-item-name">{{ item.civitai_name || item.filename }}</span>
+                    <div class="inv-item-meta">
+                      <span class="inv-base-badge" *ngIf="item.base_model">{{ item.base_model }}</span>
+                      <span class="inv-civitai-badge" *ngIf="item.from_civitai">CivitAI</span>
+                      <span class="inv-item-size">{{ formatBytes(item.size_bytes) }}</span>
+                    </div>
+                    <span class="inv-item-file" *ngIf="item.civitai_name">{{ item.filename }}</span>
+                  </div>
+                  <button class="cache-delete-btn" (click)="handleDeleteInventoryItem(item, $event)"
+                          aria-label="Eliminar modelo" title="Eliminar de ComfyUI">&#128465;</button>
+                </div>
+                <div class="inv-empty" *ngIf="getFilteredItems(cat).length === 0">
+                  Sin resultados para el filtro
+                </div>
+              </div>
             </div>
+          </div>
+
+          <div *ngIf="inventoryCategories.length === 0 && !inventoryLoading" class="empty-gallery">
+            <div class="empty-icon">&#128230;</div>
+            <p>No se pudo cargar el inventario</p>
+            <p class="empty-sub">Verifica la conexi&oacute;n con ComfyUI</p>
           </div>
         </ng-container>
 
@@ -854,7 +954,7 @@ export class AppComponent implements OnInit, OnDestroy {
   loggingIn = false;
   isAuthEnabled = false;
 
-  modelsView: 'search' | 'images' | 'cache' = 'search';
+  modelsView: 'search' | 'images' | 'cache' | 'inventory' = 'search';
   civitaiQuery = '';
   civitaiType = '';
   civitaiSort = 'Most Downloaded';
@@ -888,6 +988,14 @@ export class AppComponent implements OnInit, OnDestroy {
   cacheLoading = false;
   private cacheInterval?: ReturnType<typeof setInterval>;
 
+  inventoryCategories: InventoryCategory[] = [];
+  inventoryTotalBytes = 0;
+  inventoryTotalFiles = 0;
+  inventoryLoading = false;
+  inventoryCollapsed: Record<string, boolean> = {};
+  inventoryFilter = '';
+  inventoryActiveDownloads: CachedModel[] = [];
+
   modelTypeOptions: ModelTypeOption[] = [
     { label: 'Todos', value: '' },
     { label: 'Checkpoint', value: 'Checkpoint' },
@@ -913,6 +1021,12 @@ export class AppComponent implements OnInit, OnDestroy {
   models: Model[] = [];
   samplers: string[] = [];
   generatedImages: string[] = [];
+  generatedVideos: string[] = [];  // Video IDs from KAS_SaveVideoCache
+
+  // Video generation settings
+  generationMode: 'image' | 'video' = 'image';
+  videoLength = 81;  // Frames
+  videoFps = 8.0;
 
   configHost = '';
   configPort = '8188';
@@ -1340,8 +1454,18 @@ export class AppComponent implements OnInit, OnDestroy {
       return;
     }
 
+    // Dispatch to appropriate handler based on generation mode
+    if (this.generationMode === 'video') {
+      this.handleGenerateVideo();
+    } else {
+      this.handleGenerateImage();
+    }
+  }
+
+  handleGenerateImage() {
     this.generating = true;
     this.generatedImages = [];
+    this.generatedVideos = [];
 
     const request: GenerationRequest = {
       prompt: this.prompt,
@@ -1375,7 +1499,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   pollJob(jobId: string) {
     let attempts = 0;
-    const maxAttempts = 60;
+    const maxAttempts = this.generationMode === 'video' ? 300 : 60;  // Videos take longer
     const interval = setInterval(() => {
       attempts++;
       if (attempts > maxAttempts) {
@@ -1390,14 +1514,21 @@ export class AppComponent implements OnInit, OnDestroy {
           if (status.status === 'completed') {
             clearInterval(interval);
             this.generating = false;
-            if (status.images && status.images.length > 0) {
+
+            // Check if result is a video
+            if (status.is_video || (status.videos && status.videos.length > 0)) {
+              this.generatedVideos = status.video_ids || status.videos || [];
+              this.generatedImages = [];  // Clear images
+              this.showToast('Video generado!', 'success');
+            } else if (status.images && status.images.length > 0) {
               this.generatedImages = status.images.map(img =>
                 img.startsWith('data:image') ? img : `data:image/png;base64,${img}`
               );
+              this.generatedVideos = [];  // Clear videos
               this.showToast('Imagen generada!', 'success');
               this.loadGallery();
             } else {
-              this.showToast('No se gener\u00f3 ninguna imagen', 'error');
+              this.showToast('No se gener\u00f3 ning\u00fan resultado', 'error');
             }
           } else if (status.status === 'error') {
             clearInterval(interval);
@@ -1408,6 +1539,51 @@ export class AppComponent implements OnInit, OnDestroy {
         error: () => {}
       });
     }, 2000);
+  }
+
+  handleGenerateVideo() {
+    if (!this.prompt) {
+      this.showToast('Escribe un prompt', 'error');
+      return;
+    }
+
+    this.generating = true;
+    this.generatedImages = [];
+    this.generatedVideos = [];
+
+    const request: GenerationVideoRequest = {
+      prompt: this.prompt,
+      negative_prompt: this.negativePrompt,
+      width: this.width,
+      height: this.height,
+      length: this.videoLength,
+      fps: this.videoFps,
+      steps: this.steps,
+      cfg_scale: this.cfg,
+      sampler: this.sampler,
+      checkpoint: this.selectedModel,
+      seed: -1,
+    };
+
+    this.generationService.generateTxt2Video(request).subscribe({
+      next: (response) => {
+        this.showToast('Generaci\u00f3n de video iniciada', 'success');
+        this.pollJob(response.job_id);
+      },
+      error: (err) => {
+        this.showToast('Error: ' + err.message, 'error');
+        this.generating = false;
+      }
+    });
+
+    this.generationService.saveSettings({
+      strength: this.strength,
+      negative_prompt: this.negativePrompt,
+    }).subscribe();
+  }
+
+  getVideoUrl(videoId: string): string {
+    return this.generationService.getVideoUrl(videoId);
   }
 
   // ─── CivitAI / Models ─────────────────────────────────────────────────
@@ -1517,6 +1693,7 @@ export class AppComponent implements OnInit, OnDestroy {
         file._downloading = false;
         this.showToast('Descarga iniciada', 'success');
         this.loadCache();
+        if (this.modelsView === 'inventory') this.loadInventory();
       },
       error: () => {
         file._downloading = false;
@@ -1565,6 +1742,76 @@ export class AppComponent implements OnInit, OnDestroy {
       },
       error: () => this.showToast('Error eliminando modelo', 'error'),
     });
+  }
+
+  loadInventory() {
+    this.inventoryLoading = true;
+    this.generationService.getInventory().subscribe({
+      next: (res) => {
+        this.inventoryCategories = res.categories || [];
+        this.inventoryTotalBytes = res.total_bytes || 0;
+        this.inventoryTotalFiles = res.total_files || 0;
+        this.inventoryActiveDownloads = (res.active_downloads || []) as CachedModel[];
+        this.inventoryLoading = false;
+        if (this.inventoryActiveDownloads.length > 0 && !this.cacheInterval) {
+          this.cacheInterval = setInterval(() => this.loadInventory(), 3000);
+        }
+        if (this.inventoryActiveDownloads.length === 0 && this.cacheInterval) {
+          clearInterval(this.cacheInterval);
+          this.cacheInterval = undefined;
+        }
+      },
+      error: () => { this.inventoryLoading = false; },
+    });
+  }
+
+  handleToggleInventoryCategory(key: string) {
+    this.inventoryCollapsed[key] = !this.inventoryCollapsed[key];
+  }
+
+  getFilteredItems(cat: InventoryCategory): InventoryItem[] {
+    if (!this.inventoryFilter) return cat.items;
+    const q = this.inventoryFilter.toLowerCase();
+    return cat.items.filter(i =>
+      i.filename.toLowerCase().includes(q) ||
+      (i.civitai_name && i.civitai_name.toLowerCase().includes(q)) ||
+      (i.base_model && i.base_model.toLowerCase().includes(q))
+    );
+  }
+
+  handleDeleteInventoryItem(item: InventoryItem, event: Event) {
+    event.stopPropagation();
+    if (!confirm(`Eliminar "${item.civitai_name || item.filename}" de ComfyUI?`)) return;
+    this.generationService.deleteInventoryModel(item.folder, item.filename).subscribe({
+      next: () => {
+        for (const cat of this.inventoryCategories) {
+          const idx = cat.items.indexOf(item);
+          if (idx >= 0) {
+            cat.items.splice(idx, 1);
+            cat.count = cat.items.length;
+            cat.total_bytes -= item.size_bytes;
+            break;
+          }
+        }
+        this.inventoryTotalFiles--;
+        this.inventoryTotalBytes -= item.size_bytes;
+        this.showToast('Modelo eliminado de ComfyUI', 'success');
+      },
+      error: () => this.showToast('Error eliminando modelo', 'error'),
+    });
+  }
+
+  getInventoryIcon(icon: string): string {
+    const icons: Record<string, string> = {
+      'cube': '\u{1F4E6}',
+      'sparkles': '\u2728',
+      'film': '\u{1F3AC}',
+      'sliders': '\u{1F39B}\uFE0F',
+      'cog': '\u2699\uFE0F',
+      'arrow-up': '\u2B06\uFE0F',
+      'folder': '\u{1F4C1}',
+    };
+    return icons[icon] || '\u{1F4C1}';
   }
 
   getModelThumb(model: any): string {
