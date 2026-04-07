@@ -137,6 +137,14 @@ export class GenerationService {
     return this.http.get(`${this.apiUrl}/gallery/${imgId}/meta`);
   }
 
+  downloadLora(data: any): Observable<any> {
+    return this.http.post(`${this.apiUrl}/lora/download`, data);
+  }
+
+  getLoraDownloadStatus(downloadId: string): Observable<any> {
+    return this.http.get(`${this.apiUrl}/lora/download-status/${encodeURIComponent(downloadId)}`);
+  }
+
   getInventory(): Observable<InventoryResponse> {
     return this.http.get<InventoryResponse>(`${this.apiUrl}/inventory`);
   }

@@ -8,6 +8,7 @@ import {
   Model, GenerationRequest, GenerationVideoRequest, Settings, ComfyConfig,
   ConnectionTestResult, GalleryItem, CachedModel, ModelTypeOption,
   InventoryCategory, InventoryItem,
+  MissingLoraResult, MissingLoraCandidate,
 } from './types';
 
 @Component({
@@ -906,6 +907,55 @@ import {
         </button>
       </nav>
 
+      <!-- Missing LoRAs Dialog -->
+      <div class="ml-overlay" *ngIf="missingLorasOpen" (click)="handleCloseMissingLoras()">
+        <div class="ml-dialog" (click)="$event.stopPropagation()">
+          <div class="ml-header">
+            <span class="ml-title">LoRAs no encontrados</span>
+            <button class="ml-close" (click)="handleCloseMissingLoras()">&times;</button>
+          </div>
+          <div class="ml-body">
+            <p class="ml-desc">Los siguientes LoRAs del prompt no existen en ComfyUI. Selecciona un candidato de CivitAI para descargar.</p>
+            <div class="ml-lora-block" *ngFor="let ml of missingLoras">
+              <div class="ml-lora-tag">&lt;lora:{{ ml.lora_tag }}&gt;</div>
+              <div class="ml-progress-row" *ngIf="missingLoraProgress[ml.lora_tag]">
+                <div class="ml-progress-bar">
+                  <div class="ml-progress-fill"
+                    [style.width.%]="missingLoraProgress[ml.lora_tag].progress"
+                    [class.error]="missingLoraProgress[ml.lora_tag].status === 'error'">
+                  </div>
+                </div>
+                <span class="ml-progress-text">{{ missingLoraProgress[ml.lora_tag].status === 'completed' ? 'Completado' : missingLoraProgress[ml.lora_tag].status === 'error' ? 'Error' : missingLoraProgress[ml.lora_tag].progress + '%' }}</span>
+              </div>
+              <div class="ml-candidates" *ngIf="ml.candidates.length > 0 && !missingLoraProgress[ml.lora_tag]">
+                <div class="ml-candidate"
+                  *ngFor="let c of ml.candidates"
+                  [class.selected]="missingLoraSelections[ml.lora_tag] === c"
+                  (click)="handleSelectLoraCandidate(ml.lora_tag, c)">
+                  <img *ngIf="c.thumbnail" [src]="c.thumbnail" class="ml-thumb" alt="">
+                  <div class="ml-cand-info">
+                    <span class="ml-cand-name">{{ c.name }}</span>
+                    <span class="ml-cand-meta">{{ c.base_model }} · {{ formatSizeMB(c.size_bytes) }} · {{ c.download_count | number }} descargas</span>
+                    <span class="ml-cand-file">{{ c.filename }}</span>
+                  </div>
+                  <div class="ml-cand-check" *ngIf="missingLoraSelections[ml.lora_tag] === c">&#10003;</div>
+                </div>
+              </div>
+              <div class="ml-no-results" *ngIf="ml.candidates.length === 0">
+                No se encontraron resultados en CivitAI
+              </div>
+            </div>
+          </div>
+          <div class="ml-footer">
+            <button class="btn btn-secondary" (click)="handleCloseMissingLoras()" [disabled]="missingLoraDownloading">Cancelar</button>
+            <button class="btn btn-primary" (click)="handleDownloadMissingLoras()" [disabled]="missingLoraDownloading">
+              <span *ngIf="missingLoraDownloading" class="spinner"></span>
+              {{ missingLoraDownloading ? 'Descargando...' : 'Descargar y Generar' }}
+            </button>
+          </div>
+        </div>
+      </div>
+
       <!-- Toast -->
       <div
         class="toast"
@@ -1051,6 +1101,12 @@ export class AppComponent implements OnInit, OnDestroy {
 
   toastMessage = '';
   toastType: 'success' | 'error' = 'success';
+
+  missingLorasOpen = false;
+  missingLoras: MissingLoraResult[] = [];
+  missingLoraSelections: Record<string, MissingLoraCandidate | null> = {};
+  missingLoraDownloading = false;
+  missingLoraProgress: Record<string, { status: string; progress: number }> = {};
 
   private sessionSub?: Subscription;
   private healthInterval?: ReturnType<typeof setInterval>;
@@ -1482,6 +1538,11 @@ export class AppComponent implements OnInit, OnDestroy {
 
     this.generationService.generateTxt2Img(request).subscribe({
       next: (response) => {
+        if (response.status === 'missing_loras' && response.missing_loras?.length) {
+          this.generating = false;
+          this.handleMissingLoras(response.missing_loras);
+          return;
+        }
         this.showToast('Generaci\u00f3n iniciada', 'success');
         this.pollJob(response.job_id);
       },
@@ -1812,6 +1873,139 @@ export class AppComponent implements OnInit, OnDestroy {
       'folder': '\u{1F4C1}',
     };
     return icons[icon] || '\u{1F4C1}';
+  }
+
+  // ─── Missing LoRAs Dialog ──────────────────────────────────────────────
+
+  handleMissingLoras(missing: MissingLoraResult[]) {
+    this.missingLoras = missing;
+    this.missingLoraSelections = {};
+    this.missingLoraProgress = {};
+    this.missingLoraDownloading = false;
+
+    for (const ml of missing) {
+      this.missingLoraSelections[ml.lora_tag] = ml.candidates.length > 0
+        ? ml.candidates[0]
+        : null;
+    }
+    this.missingLorasOpen = true;
+  }
+
+  handleSelectLoraCandidate(loraTag: string, candidate: MissingLoraCandidate) {
+    this.missingLoraSelections[loraTag] = candidate;
+  }
+
+  handleCloseMissingLoras() {
+    this.missingLorasOpen = false;
+    this.missingLoras = [];
+    this.missingLoraSelections = {};
+    this.missingLoraProgress = {};
+    this.missingLoraDownloading = false;
+  }
+
+  handleDownloadMissingLoras() {
+    const toDownload: { tag: string; candidate: MissingLoraCandidate }[] = [];
+    for (const ml of this.missingLoras) {
+      const sel = this.missingLoraSelections[ml.lora_tag];
+      if (sel) {
+        toDownload.push({ tag: ml.lora_tag, candidate: sel });
+      }
+    }
+
+    if (toDownload.length === 0) {
+      this.showToast('Selecciona al menos un LoRA para descargar', 'error');
+      return;
+    }
+
+    this.missingLoraDownloading = true;
+    let completed = 0;
+
+    for (const item of toDownload) {
+      this.missingLoraProgress[item.tag] = { status: 'starting', progress: 0 };
+      this.generationService.downloadLora({
+        civitai_model_id: item.candidate.civitai_model_id,
+        civitai_version_id: item.candidate.civitai_version_id,
+        name: item.candidate.name,
+        filename: item.candidate.filename,
+        download_url: item.candidate.download_url,
+        size_bytes: item.candidate.size_bytes,
+      }).subscribe({
+        next: (resp) => {
+          const dlId = resp.download_id;
+          if (dlId) {
+            this.pollLoraDownload(item.tag, dlId, () => {
+              completed++;
+              if (completed >= toDownload.length) {
+                this.handleAllLorasDownloaded();
+              }
+            });
+          } else {
+            this.missingLoraProgress[item.tag] = { status: 'error', progress: 0 };
+            completed++;
+            if (completed >= toDownload.length) {
+              this.handleAllLorasDownloaded();
+            }
+          }
+        },
+        error: () => {
+          this.missingLoraProgress[item.tag] = { status: 'error', progress: 0 };
+          completed++;
+          if (completed >= toDownload.length) {
+            this.handleAllLorasDownloaded();
+          }
+        },
+      });
+    }
+  }
+
+  pollLoraDownload(loraTag: string, downloadId: string, onDone: () => void) {
+    const interval = setInterval(() => {
+      this.generationService.getLoraDownloadStatus(downloadId).subscribe({
+        next: (resp) => {
+          const status = resp.status || 'unknown';
+          const progress = resp.progress || 0;
+          this.missingLoraProgress[loraTag] = { status, progress };
+
+          if (status === 'completed' || status === 'not_found') {
+            clearInterval(interval);
+            onDone();
+          } else if (status === 'error' || status === 'failed') {
+            clearInterval(interval);
+            this.missingLoraProgress[loraTag] = { status: 'error', progress: 0 };
+            onDone();
+          }
+        },
+        error: () => {
+          clearInterval(interval);
+          this.missingLoraProgress[loraTag] = { status: 'error', progress: 0 };
+          onDone();
+        },
+      });
+    }, 2000);
+  }
+
+  handleAllLorasDownloaded() {
+    const allOk = Object.values(this.missingLoraProgress).every(
+      p => p.status === 'completed' || p.status === 'not_found'
+    );
+
+    if (allOk) {
+      this.showToast('LoRAs descargados. Reintentando generación...', 'success');
+      this.missingLorasOpen = false;
+      this.missingLoras = [];
+      this.missingLoraSelections = {};
+      this.missingLoraProgress = {};
+      this.missingLoraDownloading = false;
+      setTimeout(() => this.handleGenerateImage(), 1500);
+    } else {
+      this.missingLoraDownloading = false;
+      this.showToast('Algunos LoRAs no se pudieron descargar', 'error');
+    }
+  }
+
+  formatSizeMB(bytes: number): string {
+    if (!bytes || bytes <= 0) return '';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
   }
 
   getModelThumb(model: any): string {

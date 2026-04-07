@@ -373,11 +373,19 @@ class GenerationRequest(BaseModel):
     strength: float = 1.0
 
 
+class MissingLoraResult(BaseModel):
+    lora_tag: str
+    strength_model: float
+    strength_clip: float
+    candidates: List[Dict[str, Any]] = []
+
+
 class GenerationResponse(BaseModel):
     job_id: str
     status: str
     images: Optional[List[str]] = None
     error: Optional[str] = None
+    missing_loras: Optional[List[MissingLoraResult]] = None
 
 
 class GenerationVideoRequest(BaseModel):
@@ -944,6 +952,129 @@ async def delete_inventory_model(folder: str, filename: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+async def _search_civitai_lora(name: str, limit: int = 5) -> List[Dict[str, Any]]:
+    """Busca LoRAs en CivitAI por nombre y retorna candidatos simplificados."""
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://civitai.com/api/v1/models",
+                params={
+                    "query": name,
+                    "types": "LORA",
+                    "sort": "Most Downloaded",
+                    "limit": limit,
+                },
+            )
+            if resp.status_code != 200:
+                return []
+
+            items = resp.json().get("items", [])
+            results = []
+            for item in items[:limit]:
+                versions = item.get("modelVersions", [])
+                version = versions[0] if versions else {}
+                files = version.get("files", [])
+                primary_file = next(
+                    (f for f in files if f.get("primary")),
+                    files[0] if files else {},
+                )
+                images = version.get("images", [])
+                thumb = images[0].get("url", "") if images else ""
+
+                results.append({
+                    "civitai_model_id": item.get("id"),
+                    "civitai_version_id": version.get("id"),
+                    "name": item.get("name", ""),
+                    "filename": primary_file.get("name", ""),
+                    "size_bytes": primary_file.get("sizeKB", 0) * 1024,
+                    "download_url": version.get("downloadUrl", ""),
+                    "base_model": version.get("baseModel", ""),
+                    "thumbnail": thumb,
+                    "download_count": item.get("stats", {}).get("downloadCount", 0),
+                    "rating": item.get("stats", {}).get("rating", 0),
+                })
+            return results
+    except Exception as e:
+        print(f"[search_lora] Error buscando '{name}': {e}")
+        return []
+
+
+class LoraDownloadRequest(BaseModel):
+    civitai_model_id: int
+    civitai_version_id: int
+    name: str
+    filename: str
+    download_url: str
+    size_bytes: float = 0
+
+
+@app.post("/api/lora/download")
+async def download_lora(req: LoraDownloadRequest):
+    """Descarga un LoRA desde CivitAI directamente a ComfyUI via KAS plugin."""
+    comfy_url = get_comfyui_url()
+    civitai_key = ""
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        row = conn.execute(
+            "SELECT value FROM config WHERE key='civitai_api_key'"
+        ).fetchone()
+        if row and row[0]:
+            civitai_key = row[0]
+        conn.close()
+    except Exception:
+        pass
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            payload = {
+                "download_url": req.download_url,
+                "filename": req.filename,
+                "type": "LORA",
+                "civitai_model_id": req.civitai_model_id,
+                "civitai_version_id": req.civitai_version_id,
+                "api_key": civitai_key if civitai_key else None,
+            }
+            headers = {}
+            if civitai_key:
+                headers["X-Civitai-Api-Key"] = civitai_key
+
+            resp = await client.post(
+                f"{comfy_url}/api/kas/models/download",
+                json=payload,
+                headers=headers,
+            )
+            if resp.status_code == 200:
+                result = resp.json()
+                plugin_dl_id = result.get("download", {}).get("id", "")
+                return {"status": "downloading", "download_id": plugin_dl_id}
+
+            return {"status": "error", "detail": resp.text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/lora/download-status/{download_id}")
+async def lora_download_status(download_id: str):
+    """Consulta el estado de una descarga de LoRA en el plugin KAS."""
+    comfy_url = get_comfyui_url()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{comfy_url}/api/kas/downloads")
+            if resp.status_code == 200:
+                downloads = resp.json().get("downloads", [])
+                for dl in downloads:
+                    if dl.get("id") == download_id:
+                        return {
+                            "status": dl.get("status", "unknown"),
+                            "progress": dl.get("progress", 0),
+                            "error": dl.get("error"),
+                            "filename": dl.get("filename", ""),
+                        }
+                return {"status": "not_found"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+
 @app.get("/api/samplers")
 async def get_samplers():
     samplers = [
@@ -992,6 +1123,7 @@ async def txt2img(request: GenerationRequest):
                 print(f"[txt2img] No se pudo obtener lista de LoRAs: {e}")
 
             resolved_loras = []
+            missing_loras = []
             for name, strength_model, strength_clip in lora_tags:
                 filename = resolve_lora_filename(name, available_loras)
                 if filename:
@@ -999,6 +1131,23 @@ async def txt2img(request: GenerationRequest):
                     print(f"[txt2img] LoRA resuelto: {name} -> {filename} (model={strength_model}, clip={strength_clip})")
                 else:
                     print(f"[txt2img] LoRA no encontrado: {name}")
+                    missing_loras.append((name, strength_model, strength_clip))
+
+            if missing_loras:
+                candidates_list = []
+                for lora_name, sm, sc in missing_loras:
+                    candidates = await _search_civitai_lora(lora_name)
+                    candidates_list.append(MissingLoraResult(
+                        lora_tag=lora_name,
+                        strength_model=sm,
+                        strength_clip=sc,
+                        candidates=candidates,
+                    ))
+                return GenerationResponse(
+                    job_id="",
+                    status="missing_loras",
+                    missing_loras=candidates_list,
+                )
 
         workflow = create_txt2img_workflow_krita(
             prompt=clean_prompt if lora_tags else request.prompt,
@@ -1254,12 +1403,27 @@ async def txt2video(request: GenerationVideoRequest):
         if actual_seed < 0:
             actual_seed = random.randint(0, 2**32 - 1)
 
+        VIDEO_UNET_DEFAULT = "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors"
+        available_unets: list[str] = []
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as c:
+                r = await c.get(f"{comfy_url}/api/kas/models?folder=diffusion_models")
+                if r.status_code == 200:
+                    available_unets = [
+                        m["filename"] for m in r.json().get("models", {}).get("diffusion_models", [])
+                    ]
+        except Exception:
+            pass
+
+        req_checkpoint = request.checkpoint or ""
+        video_checkpoint = req_checkpoint if req_checkpoint in available_unets else VIDEO_UNET_DEFAULT
+
         workflow = create_txt2video_workflow(
             prompt=request.prompt,
             negative_prompt=request.negative_prompt or "",
-            checkpoint=request.checkpoint or "wan2.1_t2v_14B_fp16.safetensors",
+            checkpoint=video_checkpoint,
             vae=request.vae or "wan_2.1_vae.safetensors",
-            clip=request.clip or "umt5_xxl_fp16.safetensors",
+            clip=request.clip or "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
             sampler=request.sampler or "",
             scheduler=request.scheduler or "",
             steps=request.steps or 20,
@@ -1271,7 +1435,11 @@ async def txt2video(request: GenerationVideoRequest):
             fps=request.fps,
             batch_size=1,
         )
-        print(f"Generating video with seed={actual_seed}, length={request.length}")
+        print(f"Generating video with seed={actual_seed}, length={request.length}, unet={video_checkpoint}, clip={request.clip or 'umt5_xxl_fp8_e4m3fn_scaled.safetensors'}")
+        import json as _json
+        print(f"[txt2video] Workflow nodes: {list(workflow.keys())}")
+        for nid, node in workflow.items():
+            print(f"  [{nid}] {node.get('class_type','?')}: {_json.dumps(node.get('inputs',{}), default=str)[:200]}")
 
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -1280,6 +1448,7 @@ async def txt2video(request: GenerationVideoRequest):
                 timeout=5.0,
             )
             if response.status_code != 200:
+                print(f"[txt2video] ComfyUI rejected: {response.text[:500]}")
                 raise HTTPException(
                     status_code=500, detail=f"ComfyUI error: {response.text}"
                 )
@@ -1287,11 +1456,10 @@ async def txt2video(request: GenerationVideoRequest):
             result = response.json()
             prompt_id = result.get("prompt_id")
 
-            # Guardar metadata del job para recuperacion del video
             _job_meta[prompt_id] = {
                 "prompt": request.prompt,
                 "neg_prompt": request.negative_prompt or "",
-                "checkpoint": request.checkpoint or "",
+                "checkpoint": video_checkpoint,
                 "width": request.width,
                 "height": request.height,
                 "length": request.length,

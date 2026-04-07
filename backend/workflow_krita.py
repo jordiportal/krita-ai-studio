@@ -393,9 +393,9 @@ def create_txt2img_workflow_krita(
 def create_txt2video_workflow(
     prompt: str,
     negative_prompt: str = "",
-    checkpoint: str = "wan2.1_t2v_14B_fp16.safetensors",
+    checkpoint: str = "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
     vae: str = "wan_2.1_vae.safetensors",
-    clip: str = "umt5_xxl_fp16.safetensors",
+    clip: str = "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
     sampler: str = "",
     scheduler: str = "",
     steps: int = 20,
@@ -435,11 +435,11 @@ def create_txt2video_workflow(
     workflow: Dict[str, Any] = {}
     node_id = 1
 
-    # ── 1. UNETLoader (para Wan 2.1) ──
+    # ── 1. UNETLoader (para Wan 2.x) ──
     unet_id = str(node_id)
     workflow[unet_id] = {
         "_meta": {"title": "Wan UNET"},
-        "inputs": {"unet_name": checkpoint},
+        "inputs": {"unet_name": checkpoint, "weight_dtype": "default"},
         "class_type": "UNETLoader",
     }
     model_ref = [unet_id, 0]

@@ -48,6 +48,26 @@ export interface GenerationVideoRequest {
   seed: number;
 }
 
+export interface MissingLoraCandidate {
+  civitai_model_id: number;
+  civitai_version_id: number;
+  name: string;
+  filename: string;
+  size_bytes: number;
+  download_url: string;
+  base_model: string;
+  thumbnail: string;
+  download_count: number;
+  rating: number;
+}
+
+export interface MissingLoraResult {
+  lora_tag: string;
+  strength_model: number;
+  strength_clip: number;
+  candidates: MissingLoraCandidate[];
+}
+
 export interface GenerationResponse {
   job_id: string;
   status: string;
@@ -56,6 +76,7 @@ export interface GenerationResponse {
   video_ids?: string[];
   is_video?: boolean;
   error?: string;
+  missing_loras?: MissingLoraResult[];
 }
 
 export interface JobStatus {
