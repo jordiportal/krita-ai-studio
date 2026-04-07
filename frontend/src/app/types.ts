@@ -11,6 +11,7 @@ export interface Model {
 
 export interface ModelList {
   checkpoints: Model[] | string[];
+  diffusion_models?: Model[] | string[];
   loras: Model[] | string[];
   controlnets: Model[] | string[];
 }
@@ -28,6 +29,7 @@ export interface GenerationRequest {
   cfg_scale: number;
   sampler: string;
   checkpoint?: string;
+  model_type?: string;
   seed: number;
   strength?: number;
 }
@@ -179,6 +181,9 @@ export interface InventoryItem {
   folder: string;
   size_bytes: number;
   base_model: string;
+  architecture: string;
+  architecture_label: string;
+  has_override: boolean;
   from_civitai: boolean;
   civitai_name: string | null;
   civitai_model_id: number | null;
@@ -198,4 +203,66 @@ export interface InventoryResponse {
   total_files: number;
   total_bytes: number;
   active_downloads: CachedModel[];
+}
+
+export interface ArchitectureSampling {
+  sampler: string;
+  scheduler: string;
+  steps: number;
+  cfg: number;
+}
+
+export interface ArchitectureClip {
+  mode: string;
+  type?: string;
+  clip1?: string;
+  clip2?: string;
+}
+
+export interface ArchitectureGuidance {
+  type: string;
+  default?: number;
+}
+
+export interface Architecture {
+  id: string;
+  label: string;
+  detection: string[];
+  exclude: string[];
+  require?: string[];
+  priority: number;
+  loader: string;
+  clip: ArchitectureClip;
+  vae: string | null;
+  weight_dtype?: string;
+  latent_node: string;
+  guidance: ArchitectureGuidance;
+  sampling: ArchitectureSampling;
+  prompt: { style: string; negative: string };
+  rescale_cfg: boolean;
+  capabilities: string[];
+  hidden_from: string[];
+}
+
+export interface ArchitecturesResponse {
+  architectures: Architecture[];
+}
+
+export interface ModelOverride {
+  filename: string;
+  architecture: string | null;
+  sampling: Partial<ArchitectureSampling>;
+  clip: Partial<ArchitectureClip>;
+  vae: string | null;
+  hidden: number;
+  notes: string;
+}
+
+export interface ModelOverrideResponse {
+  filename: string;
+  override: ModelOverride | null;
+}
+
+export interface ModelOverridesListResponse {
+  overrides: ModelOverride[];
 }

@@ -1,0 +1,249 @@
+{
+  "version": "1.0.0",
+  "architectures": {
+    "illustrious": {
+      "label": "Illustrious",
+      "detection": ["illustrious", "illu", "noobai", "novaanime"],
+      "exclude": [],
+      "priority": 10,
+      "loader": "checkpoint",
+      "clip": { "mode": "builtin" },
+      "vae": null,
+      "latent_node": "EmptyLatentImage",
+      "guidance": { "type": "cfg" },
+      "sampling": {
+        "sampler": "euler_ancestral",
+        "scheduler": "normal",
+        "steps": 24,
+        "cfg": 5.0
+      },
+      "prompt": {
+        "style": "{prompt}, masterpiece, best quality, recent, newest, absurdres, highres",
+        "negative": "nsfw, explicit, worst quality, worst aesthetic, bad quality, average quality, oldest, old, very displeasing, displeasing"
+      },
+      "rescale_cfg": false,
+      "capabilities": ["txt2img", "img2img", "inpainting"],
+      "hidden_from": []
+    },
+    "z_image_turbo": {
+      "label": "Z-Image Turbo",
+      "detection": ["z_image", "z-image"],
+      "require": ["turbo"],
+      "exclude": [],
+      "priority": 20,
+      "loader": "diffusion",
+      "clip": {
+        "mode": "single",
+        "type": "lumina2",
+        "clip1": "qwen_3_4b.safetensors"
+      },
+      "vae": "ae.safetensors",
+      "weight_dtype": "default",
+      "latent_node": "EmptySD3LatentImage",
+      "guidance": { "type": "basic" },
+      "sampling": {
+        "sampler": "euler_ancestral",
+        "scheduler": "sgm_uniform",
+        "steps": 8,
+        "cfg": 1.0
+      },
+      "prompt": {
+        "style": "{prompt}",
+        "negative": ""
+      },
+      "rescale_cfg": false,
+      "capabilities": ["txt2img"],
+      "hidden_from": []
+    },
+    "z_image": {
+      "label": "Z-Image (Base)",
+      "detection": ["z_image", "z-image"],
+      "exclude": ["turbo"],
+      "priority": 15,
+      "loader": "diffusion",
+      "clip": {
+        "mode": "single",
+        "type": "lumina2",
+        "clip1": "qwen_3_4b.safetensors"
+      },
+      "vae": "ae.safetensors",
+      "weight_dtype": "default",
+      "latent_node": "EmptySD3LatentImage",
+      "guidance": { "type": "basic" },
+      "sampling": {
+        "sampler": "euler_ancestral",
+        "scheduler": "sgm_uniform",
+        "steps": 20,
+        "cfg": 1.0
+      },
+      "prompt": {
+        "style": "{prompt}",
+        "negative": ""
+      },
+      "rescale_cfg": false,
+      "capabilities": [],
+      "hidden_from": ["image_generation"]
+    },
+    "flux2": {
+      "label": "Flux 2",
+      "detection": ["flux2"],
+      "exclude": [],
+      "priority": 12,
+      "loader": "diffusion",
+      "clip": {
+        "mode": "dual",
+        "type": "flux2",
+        "clip1": "mistral_3_small_flux2_bf16.safetensors",
+        "clip2": "mistral_3_small_flux2_bf16.safetensors"
+      },
+      "vae": "flux2-vae.safetensors",
+      "weight_dtype": "default",
+      "latent_node": "EmptySD3LatentImage",
+      "guidance": { "type": "flux", "default": 3.5 },
+      "sampling": {
+        "sampler": "euler",
+        "scheduler": "simple",
+        "steps": 20,
+        "cfg": 1.0
+      },
+      "prompt": {
+        "style": "{prompt}",
+        "negative": ""
+      },
+      "rescale_cfg": false,
+      "capabilities": ["txt2img"],
+      "hidden_from": []
+    },
+    "flux": {
+      "label": "Flux",
+      "detection": ["flux"],
+      "exclude": ["flux2"],
+      "priority": 8,
+      "loader": "diffusion",
+      "clip": {
+        "mode": "dual",
+        "type": "flux",
+        "clip1": "qwen_3_4b_fp8_mixed.safetensors",
+        "clip2": "qwen_3_4b_fp8_mixed.safetensors"
+      },
+      "vae": "ae.safetensors",
+      "weight_dtype": "default",
+      "latent_node": "EmptySD3LatentImage",
+      "guidance": { "type": "flux", "default": 3.5 },
+      "sampling": {
+        "sampler": "euler",
+        "scheduler": "simple",
+        "steps": 20,
+        "cfg": 1.0
+      },
+      "prompt": {
+        "style": "{prompt}",
+        "negative": ""
+      },
+      "rescale_cfg": false,
+      "capabilities": ["txt2img"],
+      "hidden_from": []
+    },
+    "sd3": {
+      "label": "Stable Diffusion 3",
+      "detection": ["sd3", "stable_diffusion_3"],
+      "exclude": [],
+      "priority": 6,
+      "loader": "checkpoint",
+      "clip": { "mode": "builtin" },
+      "vae": null,
+      "latent_node": "EmptySD3LatentImage",
+      "guidance": { "type": "cfg" },
+      "sampling": {
+        "sampler": "dpmpp_2m",
+        "scheduler": "sgm_uniform",
+        "steps": 24,
+        "cfg": 5.0
+      },
+      "prompt": {
+        "style": "{prompt}",
+        "negative": ""
+      },
+      "rescale_cfg": false,
+      "capabilities": ["txt2img", "img2img"],
+      "hidden_from": []
+    },
+    "sdxl": {
+      "label": "Stable Diffusion XL",
+      "detection": ["xl", "sdxl"],
+      "exclude": [],
+      "priority": 4,
+      "loader": "checkpoint",
+      "clip": { "mode": "builtin" },
+      "vae": null,
+      "latent_node": "EmptyLatentImage",
+      "guidance": { "type": "cfg" },
+      "sampling": {
+        "sampler": "dpmpp_2m",
+        "scheduler": "karras",
+        "steps": 20,
+        "cfg": 7.0
+      },
+      "prompt": {
+        "style": "{prompt}",
+        "negative": ""
+      },
+      "rescale_cfg": false,
+      "capabilities": ["txt2img", "img2img", "inpainting"],
+      "hidden_from": []
+    },
+    "sd15": {
+      "label": "Stable Diffusion 1.5",
+      "detection": [],
+      "exclude": [],
+      "priority": 1,
+      "loader": "checkpoint",
+      "clip": { "mode": "builtin" },
+      "vae": null,
+      "latent_node": "EmptyLatentImage",
+      "guidance": { "type": "cfg" },
+      "sampling": {
+        "sampler": "dpmpp_2m",
+        "scheduler": "karras",
+        "steps": 20,
+        "cfg": 7.0
+      },
+      "prompt": {
+        "style": "{prompt}",
+        "negative": ""
+      },
+      "rescale_cfg": false,
+      "capabilities": ["txt2img", "img2img", "inpainting"],
+      "hidden_from": []
+    },
+    "wan_t2v": {
+      "label": "Wan 2.x Text-to-Video",
+      "detection": ["wan"],
+      "exclude": [],
+      "priority": 9,
+      "loader": "diffusion",
+      "clip": {
+        "mode": "single",
+        "type": "wan",
+        "clip1": "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+      },
+      "vae": "wan_2.1_vae.safetensors",
+      "weight_dtype": "default",
+      "latent_node": "WanImageToVideo",
+      "guidance": { "type": "cfg" },
+      "sampling": {
+        "sampler": "euler_ancestral",
+        "scheduler": "normal",
+        "steps": 20,
+        "cfg": 7.0
+      },
+      "prompt": {
+        "style": "{prompt}",
+        "negative": ""
+      },
+      "rescale_cfg": false,
+      "capabilities": ["txt2video"],
+      "hidden_from": ["image_generation"]
+    }
+  }
+}

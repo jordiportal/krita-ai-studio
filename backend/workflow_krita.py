@@ -1,25 +1,16 @@
 """
-Workflow generator que replica EXACTAMENTE el comportamiento de krita-ai-diffusion.
+Workflow generator for Krita AI Studio.
 
-Trazado del código fuente del plugin:
-  workflow.py:generate() → comfy_workflow.py:sampler_custom_advanced()
+Uses architectures.json (via ArchManager) for model-specific configuration
+instead of hardcoded dicts. Supports both checkpoint and diffusion model loaders.
 
-Para Illustrious (Arch.illu, epsilon prediction):
-  - Sampler: euler_ancestral (preset "Alternative - Euler A")
-  - Scheduler: normal
-  - Steps: 24
-  - CFG: 5.0
-  - Style prompt: "{prompt}, masterpiece, best quality, recent, newest, absurdres, highres"
-  - Negative prompt: "nsfw, explicit, worst quality, ..."
-  - RescaleCFG: NO (solo para illu_v / v-prediction)
-  - Nodos: SamplerCustomAdvanced + CFGGuider + BasicScheduler + RandomNoise + KSamplerSelect
-  - Latent: EmptyLatentImage (no EmptySD3LatentImage)
-  - Decode: VAEDecode
-  - Output: ETN_SaveImageCache
+Main entry point: build_txt2img_workflow(arch_config, prompt, ...)
 """
 
 import re
 from typing import Dict, Any, List, Tuple
+
+from architectures import get_arch_manager
 
 
 def parse_lora_tags(prompt: str) -> Tuple[str, List[Tuple[str, float]]]:
@@ -69,82 +60,11 @@ def resolve_lora_filename(lora_name: str, available_loras: List[str]) -> str | N
     return None
 
 
-MODEL_CONFIGS = {
-    "illustrious": {
-        "sampler": "euler_ancestral",
-        "scheduler": "normal",
-        "steps": 24,
-        "cfg": 5.0,
-        "style_prompt": "{prompt}, masterpiece, best quality, recent, newest, absurdres, highres",
-        "negative_prompt": "nsfw, explicit, worst quality, worst aesthetic, bad quality, average quality, oldest, old, very displeasing, displeasing",
-        "rescale_cfg": False,
-        "is_flux": False,
-        "is_sd3": False,
-    },
-    "sdxl": {
-        "sampler": "dpmpp_2m",
-        "scheduler": "karras",
-        "steps": 20,
-        "cfg": 7.0,
-        "style_prompt": "{prompt}",
-        "negative_prompt": "",
-        "rescale_cfg": False,
-        "is_flux": False,
-        "is_sd3": False,
-    },
-    "flux": {
-        "sampler": "euler",
-        "scheduler": "simple",
-        "steps": 20,
-        "cfg": 1.0,
-        "style_prompt": "{prompt}",
-        "negative_prompt": "",
-        "rescale_cfg": False,
-        "is_flux": True,
-        "is_sd3": False,
-    },
-    "sd3": {
-        "sampler": "dpmpp_2m",
-        "scheduler": "sgm_uniform",
-        "steps": 24,
-        "cfg": 5.0,
-        "style_prompt": "{prompt}",
-        "negative_prompt": "",
-        "rescale_cfg": False,
-        "is_flux": False,
-        "is_sd3": True,
-    },
-    "sd15": {
-        "sampler": "dpmpp_2m",
-        "scheduler": "karras",
-        "steps": 20,
-        "cfg": 7.0,
-        "style_prompt": "{prompt}",
-        "negative_prompt": "",
-        "rescale_cfg": False,
-        "is_flux": False,
-        "is_sd3": False,
-    },
-}
-
-
-def detect_model_type(checkpoint_name: str) -> str:
-    name = checkpoint_name.lower()
-    if "illustrious" in name or "illu" in name or "noobai" in name:
-        return "illustrious"
-    if "flux" in name:
-        return "flux"
-    if "sd3" in name or "stable_diffusion_3" in name:
-        return "sd3"
-    if "xl" in name or "sdxl" in name:
-        return "sdxl"
-    return "sd15"
-
-
-def create_txt2img_workflow_krita(
+def build_txt2img_workflow(
+    arch_config: Dict[str, Any],
     prompt: str,
     negative_prompt: str = "",
-    checkpoint: str = "SDXL.safetensors",
+    model_name: str = "SDXL.safetensors",
     sampler: str = "",
     scheduler: str = "",
     steps: int = 0,
@@ -156,40 +76,102 @@ def create_txt2img_workflow_krita(
     loras: List[Tuple[str, float, float]] | None = None,
 ) -> Dict[str, Any]:
     """
-    Crea un workflow txt2img que replica EXACTAMENTE el de krita-ai-diffusion.
+    Unified txt2img workflow builder driven by arch_config (from ArchManager.resolve()).
 
-    Si no se pasan sampler/scheduler/steps/cfg, se usan los del estilo del modelo.
+    arch_config fields used:
+      loader: "checkpoint" | "diffusion"
+      clip: {mode, type, clip1, clip2}
+      vae: str | null
+      weight_dtype: str (for diffusion loader)
+      latent_node: "EmptyLatentImage" | "EmptySD3LatentImage"
+      guidance: {type: "cfg"|"flux"|"basic", default: float}
+      sampling: {sampler, scheduler, steps, cfg}
+      prompt: {style, negative}
+      rescale_cfg: bool
     """
 
-    model_type = detect_model_type(checkpoint)
-    config = MODEL_CONFIGS.get(model_type, MODEL_CONFIGS["sdxl"])
+    sampling = arch_config.get("sampling", {})
+    actual_sampler = sampler if sampler else sampling.get("sampler", "euler")
+    actual_scheduler = scheduler if scheduler else sampling.get("scheduler", "normal")
+    actual_steps = steps if steps > 0 else sampling.get("steps", 20)
+    actual_cfg = cfg if cfg > 0 else sampling.get("cfg", 7.0)
 
-    actual_sampler = sampler if sampler else config["sampler"]
-    actual_scheduler = scheduler if scheduler else config["scheduler"]
-    actual_steps = steps if steps > 0 else config["steps"]
-    actual_cfg = cfg if cfg > 0 else config["cfg"]
-    is_flux = config["is_flux"]
-    is_sd3 = config["is_sd3"]
+    prompt_cfg = arch_config.get("prompt", {})
+    style = prompt_cfg.get("style", "{prompt}")
+    final_prompt = style.replace("{prompt}", prompt)
+    final_negative = negative_prompt if negative_prompt else prompt_cfg.get("negative", "")
 
-    final_prompt = config["style_prompt"].replace("{prompt}", prompt)
-    final_negative = negative_prompt if negative_prompt else config["negative_prompt"]
+    guidance = arch_config.get("guidance", {})
+    guidance_type = guidance.get("type", "cfg")
+
+    loader_type = arch_config.get("loader", "checkpoint")
+    clip_cfg = arch_config.get("clip", {})
+    latent_node = arch_config.get("latent_node", "EmptyLatentImage")
 
     workflow: Dict[str, Any] = {}
     node_id = 1
 
-    # ── 1. CheckpointLoaderSimple ──
-    checkpoint_id = str(node_id)
-    workflow[checkpoint_id] = {
-        "_meta": {"title": "Checkpoint"},
-        "inputs": {"ckpt_name": checkpoint},
-        "class_type": "CheckpointLoaderSimple",
-    }
-    model_ref = [checkpoint_id, 0]
-    clip_ref = [checkpoint_id, 1]
-    vae_ref = [checkpoint_id, 2]
-    node_id += 1
+    # ── Model loading ──
+    if loader_type == "diffusion":
+        unet_id = str(node_id)
+        workflow[unet_id] = {
+            "_meta": {"title": "UNET Model"},
+            "inputs": {
+                "unet_name": model_name,
+                "weight_dtype": arch_config.get("weight_dtype", "default"),
+            },
+            "class_type": "UNETLoader",
+        }
+        model_ref = [unet_id, 0]
+        node_id += 1
 
-    # ── 1b. LoRA Loaders (encadenados) ──
+        clip_mode = clip_cfg.get("mode", "dual")
+        clip_loader_id = str(node_id)
+        if clip_mode == "single":
+            workflow[clip_loader_id] = {
+                "_meta": {"title": "CLIP Loader"},
+                "inputs": {
+                    "clip_name": clip_cfg.get("clip1", ""),
+                    "type": clip_cfg.get("type", "flux"),
+                },
+                "class_type": "CLIPLoader",
+            }
+        else:
+            workflow[clip_loader_id] = {
+                "_meta": {"title": "CLIP Loader"},
+                "inputs": {
+                    "clip_name1": clip_cfg.get("clip1", ""),
+                    "clip_name2": clip_cfg.get("clip2", clip_cfg.get("clip1", "")),
+                    "type": clip_cfg.get("type", "flux"),
+                },
+                "class_type": "DualCLIPLoader",
+            }
+        clip_ref = [clip_loader_id, 0]
+        node_id += 1
+
+        vae_name = arch_config.get("vae")
+        vae_loader_id = str(node_id)
+        workflow[vae_loader_id] = {
+            "_meta": {"title": "VAE Loader"},
+            "inputs": {"vae_name": vae_name or "ae.safetensors"},
+            "class_type": "VAELoader",
+        }
+        vae_ref = [vae_loader_id, 0]
+        node_id += 1
+
+    else:
+        checkpoint_id = str(node_id)
+        workflow[checkpoint_id] = {
+            "_meta": {"title": "Checkpoint"},
+            "inputs": {"ckpt_name": model_name},
+            "class_type": "CheckpointLoaderSimple",
+        }
+        model_ref = [checkpoint_id, 0]
+        clip_ref = [checkpoint_id, 1]
+        vae_ref = [checkpoint_id, 2]
+        node_id += 1
+
+    # ── LoRA Loaders ──
     if loras:
         for lora_filename, strength_model, strength_clip in loras:
             lora_id = str(node_id)
@@ -208,28 +190,31 @@ def create_txt2img_workflow_krita(
             clip_ref = [lora_id, 1]
             node_id += 1
 
-    # ── 2. CLIPTextEncode (Positive) ──
+    # ── Positive prompt ──
     positive_id = str(node_id)
     workflow[positive_id] = {
         "_meta": {"title": "Positive Prompt"},
-        "inputs": {
-            "text": final_prompt,
-            "clip": clip_ref,
-        },
+        "inputs": {"text": final_prompt, "clip": clip_ref},
         "class_type": "CLIPTextEncode",
     }
     positive_ref = [positive_id, 0]
     node_id += 1
 
-    # ── 3. CLIPTextEncode (Negative) / ConditioningZeroOut ──
-    if final_negative and final_negative.strip() and not is_flux:
+    # ── Negative / ConditioningZeroOut ──
+    if guidance_type in ("flux", "basic"):
+        negative_id = str(node_id)
+        workflow[negative_id] = {
+            "_meta": {"title": "Zero Conditioning"},
+            "inputs": {"conditioning": positive_ref},
+            "class_type": "ConditioningZeroOut",
+        }
+        negative_ref = [negative_id, 0]
+        node_id += 1
+    elif final_negative and final_negative.strip():
         negative_id = str(node_id)
         workflow[negative_id] = {
             "_meta": {"title": "Negative Prompt"},
-            "inputs": {
-                "text": final_negative,
-                "clip": clip_ref,
-            },
+            "inputs": {"text": final_negative, "clip": clip_ref},
             "class_type": "CLIPTextEncode",
         }
         negative_ref = [negative_id, 0]
@@ -238,32 +223,23 @@ def create_txt2img_workflow_krita(
         negative_id = str(node_id)
         workflow[negative_id] = {
             "_meta": {"title": "Zero Conditioning"},
-            "inputs": {
-                "conditioning": positive_ref,
-            },
+            "inputs": {"conditioning": positive_ref},
             "class_type": "ConditioningZeroOut",
         }
         negative_ref = [negative_id, 0]
         node_id += 1
 
-    # ── 4. EmptyLatentImage ──
+    # ── Empty latent ──
     latent_id = str(node_id)
-    if is_flux or is_sd3:
-        workflow[latent_id] = {
-            "_meta": {"title": "Empty Latent"},
-            "inputs": {"width": width, "height": height, "batch_size": batch_size},
-            "class_type": "EmptySD3LatentImage",
-        }
-    else:
-        workflow[latent_id] = {
-            "_meta": {"title": "Empty Latent"},
-            "inputs": {"width": width, "height": height, "batch_size": batch_size},
-            "class_type": "EmptyLatentImage",
-        }
+    workflow[latent_id] = {
+        "_meta": {"title": "Empty Latent"},
+        "inputs": {"width": width, "height": height, "batch_size": batch_size},
+        "class_type": latent_node,
+    }
     latent_ref = [latent_id, 0]
     node_id += 1
 
-    # ── 5. RandomNoise ──
+    # ── RandomNoise ──
     noise_id = str(node_id)
     workflow[noise_id] = {
         "_meta": {"title": "Random Noise"},
@@ -273,7 +249,7 @@ def create_txt2img_workflow_krita(
     noise_ref = [noise_id, 0]
     node_id += 1
 
-    # ── 6. KSamplerSelect ──
+    # ── KSamplerSelect ──
     sampler_select_id = str(node_id)
     workflow[sampler_select_id] = {
         "_meta": {"title": "Sampler"},
@@ -283,7 +259,7 @@ def create_txt2img_workflow_krita(
     sampler_ref = [sampler_select_id, 0]
     node_id += 1
 
-    # ── 7. BasicScheduler ──
+    # ── BasicScheduler ──
     scheduler_id = str(node_id)
     workflow[scheduler_id] = {
         "_meta": {"title": "Scheduler"},
@@ -298,40 +274,43 @@ def create_txt2img_workflow_krita(
     sigmas_ref = [scheduler_id, 0]
     node_id += 1
 
-    # ── 8. Guider (CFGGuider para modelos con CFG, BasicGuider para Flux) ──
-    guider_id = str(node_id)
-    if is_flux:
+    # ── Guider ──
+    if guidance_type == "flux":
+        default_guidance = guidance.get("default", 3.5)
         flux_guid_id = str(node_id)
         workflow[flux_guid_id] = {
             "_meta": {"title": "Flux Guidance"},
             "inputs": {
                 "conditioning": positive_ref,
-                "guidance": 3.5 if actual_cfg <= 1 else actual_cfg,
+                "guidance": default_guidance if actual_cfg <= 1 else actual_cfg,
             },
             "class_type": "FluxGuidance",
         }
-        flux_positive_ref = [flux_guid_id, 0]
+        guider_cond_ref = [flux_guid_id, 0]
         node_id += 1
 
         guider_id = str(node_id)
         workflow[guider_id] = {
             "_meta": {"title": "Guider"},
-            "inputs": {
-                "model": model_ref,
-                "conditioning": flux_positive_ref,
-            },
+            "inputs": {"model": model_ref, "conditioning": guider_cond_ref},
+            "class_type": "BasicGuider",
+        }
+    elif guidance_type == "basic":
+        guider_id = str(node_id)
+        workflow[guider_id] = {
+            "_meta": {"title": "Guider"},
+            "inputs": {"model": model_ref, "conditioning": positive_ref},
             "class_type": "BasicGuider",
         }
     elif actual_cfg == 1.0:
+        guider_id = str(node_id)
         workflow[guider_id] = {
             "_meta": {"title": "Guider"},
-            "inputs": {
-                "model": model_ref,
-                "conditioning": positive_ref,
-            },
+            "inputs": {"model": model_ref, "conditioning": positive_ref},
             "class_type": "BasicGuider",
         }
     else:
+        guider_id = str(node_id)
         workflow[guider_id] = {
             "_meta": {"title": "CFG Guider"},
             "inputs": {
@@ -345,7 +324,7 @@ def create_txt2img_workflow_krita(
     guider_ref = [guider_id, 0]
     node_id += 1
 
-    # ── 9. SamplerCustomAdvanced ──
+    # ── SamplerCustomAdvanced ──
     sampler_adv_id = str(node_id)
     workflow[sampler_adv_id] = {
         "_meta": {"title": "Sampler Advanced"},
@@ -358,48 +337,41 @@ def create_txt2img_workflow_krita(
         },
         "class_type": "SamplerCustomAdvanced",
     }
-    # SamplerCustomAdvanced output[0]=output, output[1]=denoised_output
-    # Krita usa output[1] (denoised_output) para VAEDecode
     sampler_output_ref = [sampler_adv_id, 1]
     node_id += 1
 
-    # ── 10. VAEDecode ──
+    # ── VAEDecode ──
     decode_id = str(node_id)
     workflow[decode_id] = {
         "_meta": {"title": "VAE Decode"},
-        "inputs": {
-            "samples": sampler_output_ref,
-            "vae": vae_ref,
-        },
+        "inputs": {"samples": sampler_output_ref, "vae": vae_ref},
         "class_type": "VAEDecode",
     }
     image_ref = [decode_id, 0]
     node_id += 1
 
-    # ── 11. ETN_SaveImageCache ──
+    # ── ETN_SaveImageCache ──
     cache_id = str(node_id)
     workflow[cache_id] = {
         "_meta": {"title": "Save to Cache"},
-        "inputs": {
-            "images": image_ref,
-            "format": "PNG",
-        },
+        "inputs": {"images": image_ref, "format": "PNG"},
         "class_type": "ETN_SaveImageCache",
     }
 
     return workflow
 
 
-def create_txt2video_workflow(
+def build_txt2video_workflow(
+    arch_config: Dict[str, Any],
     prompt: str,
     negative_prompt: str = "",
-    checkpoint: str = "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
-    vae: str = "wan_2.1_vae.safetensors",
-    clip: str = "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+    model_name: str = "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
+    vae_override: str = "",
+    clip_override: str = "",
     sampler: str = "",
     scheduler: str = "",
-    steps: int = 20,
-    cfg: float = 7.0,
+    steps: int = 0,
+    cfg: float = 0,
     seed: int = -1,
     width: int = 832,
     height: int = 480,
@@ -408,58 +380,52 @@ def create_txt2video_workflow(
     batch_size: int = 1,
 ) -> Dict[str, Any]:
     """
-    Crea un workflow txt2video usando Wan 2.1 T2V.
-
-    Wan 2.1 requiere:
-    - UNet especifico (Wan 2.1 T2V)
-    - VAE de Wan (16 canales, compresion temporal)
-    - Text encoder UMT5
-
-    Nodos principales:
-    - UNETLoader (type=wan)
-    - VAELoader
-    - CLIPLoader (type=wan / t5)
-    - CLIPTextEncode x2
-    - WanImageToVideo (sin imagen inicial = T2V puro)
-    - RandomNoise + KSamplerSelect + BasicScheduler
-    - SamplerCustomAdvanced + VAEDecode
-    - KAS_SaveVideoCache (nuestro nodo de cache)
+    Text-to-video workflow (Wan 2.x). Uses arch_config for defaults.
     """
+    sampling = arch_config.get("sampling", {})
+    actual_sampler = sampler if sampler else sampling.get("sampler", "euler_ancestral")
+    actual_scheduler = scheduler if scheduler else sampling.get("scheduler", "normal")
+    actual_steps = steps if steps > 0 else sampling.get("steps", 20)
+    actual_cfg = cfg if cfg > 0 else sampling.get("cfg", 7.0)
 
-    # Defaults para Wan T2V
-    actual_sampler = sampler if sampler else "euler_ancestral"
-    actual_scheduler = scheduler if scheduler else "normal"
-    actual_steps = steps if steps > 0 else 20
-    actual_cfg = cfg if cfg > 0 else 7.0
+    clip_cfg = arch_config.get("clip", {})
+    clip_name = clip_override or clip_cfg.get("clip1", "umt5_xxl_fp8_e4m3fn_scaled.safetensors")
+    vae_name = vae_override or arch_config.get("vae", "wan_2.1_vae.safetensors")
 
     workflow: Dict[str, Any] = {}
     node_id = 1
 
-    # ── 1. UNETLoader (para Wan 2.x) ──
+    # ── 1. UNETLoader ──
     unet_id = str(node_id)
     workflow[unet_id] = {
         "_meta": {"title": "Wan UNET"},
-        "inputs": {"unet_name": checkpoint, "weight_dtype": "default"},
+        "inputs": {
+            "unet_name": model_name,
+            "weight_dtype": arch_config.get("weight_dtype", "default"),
+        },
         "class_type": "UNETLoader",
     }
     model_ref = [unet_id, 0]
     node_id += 1
 
-    # ── 2. CLIPLoader (para UMT5 / Wan text encoder) ──
+    # ── 2. CLIPLoader ──
     clip_id = str(node_id)
     workflow[clip_id] = {
         "_meta": {"title": "Wan CLIP"},
-        "inputs": {"clip_name": clip, "type": "wan"},
+        "inputs": {
+            "clip_name": clip_name,
+            "type": clip_cfg.get("type", "wan"),
+        },
         "class_type": "CLIPLoader",
     }
     clip_ref = [clip_id, 0]
     node_id += 1
 
-    # ── 3. VAELoader (para Wan VAE) ──
+    # ── 3. VAELoader ──
     vae_id = str(node_id)
     workflow[vae_id] = {
         "_meta": {"title": "Wan VAE"},
-        "inputs": {"vae_name": vae},
+        "inputs": {"vae_name": vae_name},
         "class_type": "VAELoader",
     }
     vae_ref = [vae_id, 0]
@@ -469,10 +435,7 @@ def create_txt2video_workflow(
     positive_id = str(node_id)
     workflow[positive_id] = {
         "_meta": {"title": "Positive Prompt"},
-        "inputs": {
-            "text": prompt,
-            "clip": clip_ref,
-        },
+        "inputs": {"text": prompt, "clip": clip_ref},
         "class_type": "CLIPTextEncode",
     }
     positive_ref = [positive_id, 0]
@@ -491,8 +454,7 @@ def create_txt2video_workflow(
     negative_ref = [negative_id, 0]
     node_id += 1
 
-    # ── 6. WanImageToVideo (latent + conditioning para T2V) ──
-    # Sin start_image = Text-to-Video puro
+    # ── 6. WanImageToVideo ──
     wan_latent_id = str(node_id)
     workflow[wan_latent_id] = {
         "_meta": {"title": "Wan T2V Latent"},
@@ -502,14 +464,14 @@ def create_txt2video_workflow(
             "vae": vae_ref,
             "width": width,
             "height": height,
-            "length": length,  # Frames del video
+            "length": length,
             "batch_size": batch_size,
         },
         "class_type": "WanImageToVideo",
     }
-    latent_ref = [wan_latent_id, 2]  # Output 2 = latent
-    positive_cond_ref = [wan_latent_id, 0]  # Output 0 = positive conditioned
-    negative_cond_ref = [wan_latent_id, 1]  # Output 1 = negative conditioned
+    latent_ref = [wan_latent_id, 2]
+    positive_cond_ref = [wan_latent_id, 0]
+    negative_cond_ref = [wan_latent_id, 1]
     node_id += 1
 
     # ── 7. RandomNoise ──
@@ -575,7 +537,6 @@ def create_txt2video_workflow(
         },
         "class_type": "SamplerCustomAdvanced",
     }
-    # Output[1] = denoised_output
     sampler_output_ref = [sampler_adv_id, 1]
     node_id += 1
 
@@ -583,17 +544,13 @@ def create_txt2video_workflow(
     decode_id = str(node_id)
     workflow[decode_id] = {
         "_meta": {"title": "VAE Decode"},
-        "inputs": {
-            "samples": sampler_output_ref,
-            "vae": vae_ref,
-        },
+        "inputs": {"samples": sampler_output_ref, "vae": vae_ref},
         "class_type": "VAEDecode",
     }
     frames_ref = [decode_id, 0]
     node_id += 1
 
     # ── 13. KAS_SaveVideoCache ──
-    # Nuestro nodo para guardar frames como video en cache
     video_cache_id = str(node_id)
     workflow[video_cache_id] = {
         "_meta": {"title": "Save Video Cache"},

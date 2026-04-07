@@ -4,6 +4,7 @@ CivitAI integration: search, download, and manage models.
 
 import asyncio
 import json
+import os
 import sqlite3
 import time
 import uuid
@@ -66,20 +67,58 @@ def _get_civitai_key() -> str:
     return row[0] if row else ""
 
 
+CONTENT_FILTER_MAP = {
+    0: 31,   # todo: PG + PG-13 + R + X + XXX
+    1: 3,    # solo PG + PG-13
+    2: 7,    # hasta R: PG + PG-13 + R
+}
+
+
+def _get_max_bitmask() -> int:
+    """Max allowed bitmask from CONTENT_FILTER env var."""
+    try:
+        level = int(os.getenv("CONTENT_FILTER", "1"))
+    except (ValueError, TypeError):
+        level = 1
+    return CONTENT_FILTER_MAP.get(level, 3)
+
+
+def _get_user_preference() -> int:
+    """User's chosen bitmask from DB (default = max allowed)."""
+    max_bm = _get_max_bitmask()
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        row = conn.execute(
+            "SELECT value FROM config WHERE key = 'civitai_nsfw_level'"
+        ).fetchone()
+        conn.close()
+        if row and row[0]:
+            return int(row[0]) & max_bm
+    except Exception:
+        pass
+    return max_bm
+
+
 def _get_nsfw_level() -> int:
-    """Bitmask: 1=PG, 2=PG-13, 4=R, 8=X, 16=XXX.
-    Default 31 (all enabled, like CivitAI). Value 0 = no filter."""
-    conn = sqlite3.connect(str(DB_PATH))
-    row = conn.execute(
-        "SELECT value FROM config WHERE key = 'civitai_nsfw_level'"
-    ).fetchone()
-    conn.close()
-    if row and row[0]:
-        try:
-            return int(row[0])
-        except ValueError:
-            pass
-    return 31
+    """Effective bitmask = user preference clamped to max allowed."""
+    return _get_user_preference()
+
+
+def get_content_filter_info() -> dict:
+    """Returns max allowed level, user preference, and labels for the frontend."""
+    try:
+        level = int(os.getenv("CONTENT_FILTER", "1"))
+    except (ValueError, TypeError):
+        level = 1
+    labels = {0: "Sin restricciones", 1: "PG / PG-13", 2: "Hasta R"}
+    max_bm = CONTENT_FILTER_MAP.get(level, 3)
+    user_bm = _get_user_preference()
+    return {
+        "level": level,
+        "label": labels.get(level, "PG / PG-13"),
+        "max_bitmask": max_bm,
+        "user_bitmask": user_bm,
+    }
 
 
 _NSFW_LABEL_MAP = {

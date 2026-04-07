@@ -7,7 +7,7 @@ import { AuthService } from './auth.service';
 import {
   Model, GenerationRequest, GenerationVideoRequest, Settings, ComfyConfig,
   ConnectionTestResult, GalleryItem, CachedModel, ModelTypeOption,
-  InventoryCategory, InventoryItem,
+  InventoryCategory, InventoryItem, Architecture,
   MissingLoraResult, MissingLoraCandidate,
 } from './types';
 
@@ -160,8 +160,13 @@ import {
             <div class="settings-grid">
               <div class="input-group">
                 <label>Modelo</label>
-                <select class="select-field" [(ngModel)]="selectedModel" (ngModelChange)="handleSaveSetting('checkpoint', $event)">
-                  <option *ngFor="let model of models" [value]="model.name">{{ model.name }}</option>
+                <select class="select-field" [(ngModel)]="selectedModel" (ngModelChange)="handleModelChange($event)">
+                  <optgroup label="Checkpoints" *ngIf="getModelsByType('checkpoint').length > 0">
+                    <option *ngFor="let model of getModelsByType('checkpoint')" [value]="model.name">{{ model.name }}</option>
+                  </optgroup>
+                  <optgroup label="Diffusion Models" *ngIf="getModelsByType('diffusion_model').length > 0">
+                    <option *ngFor="let model of getModelsByType('diffusion_model')" [value]="model.name">{{ model.name }}</option>
+                  </optgroup>
                   <option *ngIf="models.length === 0" value="">Cargando...</option>
                 </select>
               </div>
@@ -380,54 +385,59 @@ import {
             </div>
             <div class="input-group">
               <label>Moderaci&oacute;n de contenido</label>
+              <div class="content-filter-header">
+                <span class="content-filter-badge" [class.level-0]="contentFilterLevel === 0" [class.level-1]="contentFilterLevel === 1" [class.level-2]="contentFilterLevel === 2">
+                  M&aacute;ximo permitido: {{ contentFilterLabel }}
+                </span>
+              </div>
               <div class="nsfw-toggles">
-                <div class="nsfw-toggle-row">
+                <div class="nsfw-toggle-row" [class.disabled]="!isNsfwBitAllowed(1)">
                   <div class="nsfw-toggle-info">
                     <span class="nsfw-toggle-label">PG</span>
                     <span class="nsfw-toggle-desc">Safe for work</span>
                   </div>
                   <label class="toggle-switch">
-                    <input type="checkbox" [checked]="hasNsfwBit(1)" (change)="toggleNsfwBit(1)">
+                    <input type="checkbox" [checked]="hasNsfwBit(1)" [disabled]="!isNsfwBitAllowed(1)" (change)="toggleNsfwBit(1)">
                     <span class="toggle-slider"></span>
                   </label>
                 </div>
-                <div class="nsfw-toggle-row">
+                <div class="nsfw-toggle-row" [class.disabled]="!isNsfwBitAllowed(2)">
                   <div class="nsfw-toggle-info">
                     <span class="nsfw-toggle-label">PG-13</span>
                     <span class="nsfw-toggle-desc">Ropa sugerente, gore ligero</span>
                   </div>
                   <label class="toggle-switch">
-                    <input type="checkbox" [checked]="hasNsfwBit(2)" (change)="toggleNsfwBit(2)">
+                    <input type="checkbox" [checked]="hasNsfwBit(2)" [disabled]="!isNsfwBitAllowed(2)" (change)="toggleNsfwBit(2)">
                     <span class="toggle-slider"></span>
                   </label>
                 </div>
-                <div class="nsfw-toggle-row">
+                <div class="nsfw-toggle-row" [class.disabled]="!isNsfwBitAllowed(4)">
                   <div class="nsfw-toggle-info">
                     <span class="nsfw-toggle-label">R</span>
                     <span class="nsfw-toggle-desc">Desnudez parcial, situaciones adultas</span>
                   </div>
                   <label class="toggle-switch">
-                    <input type="checkbox" [checked]="hasNsfwBit(4)" (change)="toggleNsfwBit(4)">
+                    <input type="checkbox" [checked]="hasNsfwBit(4)" [disabled]="!isNsfwBitAllowed(4)" (change)="toggleNsfwBit(4)">
                     <span class="toggle-slider"></span>
                   </label>
                 </div>
-                <div class="nsfw-toggle-row">
+                <div class="nsfw-toggle-row" [class.disabled]="!isNsfwBitAllowed(8)">
                   <div class="nsfw-toggle-info">
                     <span class="nsfw-toggle-label">X</span>
                     <span class="nsfw-toggle-desc">Desnudez expl&iacute;cita, contenido adulto</span>
                   </div>
                   <label class="toggle-switch">
-                    <input type="checkbox" [checked]="hasNsfwBit(8)" (change)="toggleNsfwBit(8)">
+                    <input type="checkbox" [checked]="hasNsfwBit(8)" [disabled]="!isNsfwBitAllowed(8)" (change)="toggleNsfwBit(8)">
                     <span class="toggle-slider"></span>
                   </label>
                 </div>
-                <div class="nsfw-toggle-row">
+                <div class="nsfw-toggle-row" [class.disabled]="!isNsfwBitAllowed(16)">
                   <div class="nsfw-toggle-info">
                     <span class="nsfw-toggle-label">XXX</span>
                     <span class="nsfw-toggle-desc">Contenido extremo</span>
                   </div>
                   <label class="toggle-switch">
-                    <input type="checkbox" [checked]="hasNsfwBit(16)" (change)="toggleNsfwBit(16)">
+                    <input type="checkbox" [checked]="hasNsfwBit(16)" [disabled]="!isNsfwBitAllowed(16)" (change)="toggleNsfwBit(16)">
                     <span class="toggle-slider"></span>
                   </label>
                 </div>
@@ -620,11 +630,14 @@ import {
               </div>
               <div class="inv-category-items" *ngIf="!inventoryCollapsed[cat.key]">
                 <div class="inv-item" *ngFor="let item of getFilteredItems(cat)">
-                  <div class="inv-item-info">
+                  <div class="inv-item-info" (click)="handleOpenOverrideModal(item)" style="cursor:pointer"
+                       tabindex="0" role="button" aria-label="Configurar modelo">
                     <span class="inv-item-name">{{ item.civitai_name || item.filename }}</span>
                     <div class="inv-item-meta">
-                      <span class="inv-base-badge" *ngIf="item.base_model">{{ item.base_model }}</span>
+                      <span class="inv-arch-badge" *ngIf="item.architecture">{{ item.architecture_label || item.architecture }}</span>
+                      <span class="inv-base-badge" *ngIf="item.base_model && !item.architecture">{{ item.base_model }}</span>
                       <span class="inv-civitai-badge" *ngIf="item.from_civitai">CivitAI</span>
+                      <span class="inv-override-badge" *ngIf="item.has_override" title="Tiene overrides personalizados">&#9881;</span>
                       <span class="inv-item-size">{{ formatBytes(item.size_bytes) }}</span>
                     </div>
                     <span class="inv-item-file" *ngIf="item.civitai_name">{{ item.filename }}</span>
@@ -645,6 +658,83 @@ import {
             <p class="empty-sub">Verifica la conexi&oacute;n con ComfyUI</p>
           </div>
         </ng-container>
+
+        <!-- MODEL OVERRIDE MODAL -->
+        <div class="override-overlay" *ngIf="overrideModalOpen" (click)="overrideModalOpen = false">
+          <div class="override-dialog" (click)="$event.stopPropagation()">
+            <div class="override-header">
+              <span class="override-title">Configuraci&oacute;n del modelo</span>
+              <button class="viewer-close" (click)="overrideModalOpen = false">&#10005;</button>
+            </div>
+
+            <div *ngIf="overrideModalLoading" class="gallery-loading" style="padding:32px"><span class="spinner"></span></div>
+
+            <div class="override-body" *ngIf="!overrideModalLoading && overrideModalItem">
+              <div class="override-filename">{{ overrideModalItem.filename }}</div>
+              <div class="override-detected">
+                Detectado: <span class="inv-arch-badge">{{ overrideModalItem.architecture_label }}</span>
+              </div>
+
+              <div class="override-field">
+                <label>Forzar arquitectura</label>
+                <select class="select-field" [(ngModel)]="overrideForm.architecture">
+                  <option value="">Auto-detectar</option>
+                  <option *ngFor="let arch of overrideArchitectures" [value]="arch.id">{{ arch.label }}</option>
+                </select>
+              </div>
+
+              <div class="override-row">
+                <div class="override-field">
+                  <label>Sampler</label>
+                  <input class="input-field" type="text" [(ngModel)]="overrideForm.sampler" placeholder="Default de la arquitectura">
+                </div>
+                <div class="override-field">
+                  <label>Scheduler</label>
+                  <input class="input-field" type="text" [(ngModel)]="overrideForm.scheduler" placeholder="Default de la arquitectura">
+                </div>
+              </div>
+
+              <div class="override-row">
+                <div class="override-field">
+                  <label>Steps</label>
+                  <input class="input-field" type="number" [(ngModel)]="overrideForm.steps" placeholder="Default">
+                </div>
+                <div class="override-field">
+                  <label>CFG</label>
+                  <input class="input-field" type="number" step="0.5" [(ngModel)]="overrideForm.cfg" placeholder="Default">
+                </div>
+              </div>
+
+              <div class="override-field">
+                <label>VAE override</label>
+                <input class="input-field" type="text" [(ngModel)]="overrideForm.vae" placeholder="Usar default de la arquitectura">
+              </div>
+
+              <div class="override-field override-checkbox">
+                <label>
+                  <input type="checkbox" [(ngModel)]="overrideForm.hidden">
+                  Ocultar del selector de generaci&oacute;n
+                </label>
+              </div>
+
+              <div class="override-field">
+                <label>Notas</label>
+                <textarea class="input-field" rows="2" [(ngModel)]="overrideForm.notes" placeholder="Notas opcionales..."></textarea>
+              </div>
+            </div>
+
+            <div class="override-footer" *ngIf="!overrideModalLoading">
+              <button class="btn btn-danger" (click)="handleDeleteOverride()"
+                      *ngIf="overrideModalItem?.has_override">Eliminar override</button>
+              <div class="override-footer-spacer"></div>
+              <button class="btn btn-secondary" (click)="overrideModalOpen = false">Cancelar</button>
+              <button class="btn btn-primary" (click)="handleSaveOverride()" [disabled]="overrideModalSaving">
+                <span *ngIf="overrideModalSaving" class="spinner" style="width:14px;height:14px;"></span>
+                {{ overrideModalSaving ? '' : 'Guardar' }}
+              </button>
+            </div>
+          </div>
+        </div>
 
         <!-- MODEL DETAIL OVERLAY -->
         <div class="model-detail-overlay" *ngIf="modelDetailOpen" (click)="modelDetailOpen = false">
@@ -1046,6 +1136,23 @@ export class AppComponent implements OnInit, OnDestroy {
   inventoryFilter = '';
   inventoryActiveDownloads: CachedModel[] = [];
 
+  // Override modal
+  overrideModalOpen = false;
+  overrideModalItem: InventoryItem | null = null;
+  overrideModalLoading = false;
+  overrideModalSaving = false;
+  overrideArchitectures: Architecture[] = [];
+  overrideForm = {
+    architecture: '' as string,
+    sampler: '',
+    scheduler: '',
+    steps: null as number | null,
+    cfg: null as number | null,
+    vae: '',
+    hidden: false,
+    notes: '',
+  };
+
   modelTypeOptions: ModelTypeOption[] = [
     { label: 'Todos', value: '' },
     { label: 'Checkpoint', value: 'Checkpoint' },
@@ -1084,7 +1191,10 @@ export class AppComponent implements OnInit, OnDestroy {
   authUser = '';
   authPass = '';
   civitaiApiKey = '';
-  civitaiNsfwLevel = '31';
+  civitaiNsfwLevel = '3';
+  contentFilterLevel = 1;
+  contentFilterLabel = 'PG / PG-13';
+  contentMaxBitmask = 3;
   testingConnection = false;
   savingConfig = false;
   connectionTestResult: ConnectionTestResult | null = null;
@@ -1215,7 +1325,13 @@ export class AppComponent implements OnInit, OnDestroy {
         this.authUser = cfg.auth_user || '';
         this.authPass = cfg.auth_pass || '';
         this.civitaiApiKey = cfg.civitai_api_key || '';
-        this.civitaiNsfwLevel = cfg.civitai_nsfw_level || '31';
+        if (cfg.content_filter) {
+          this.contentFilterLevel = cfg.content_filter.level ?? 1;
+          this.contentFilterLabel = cfg.content_filter.label || 'PG / PG-13';
+          this.contentMaxBitmask = cfg.content_filter.max_bitmask ?? 3;
+          const userBm = cfg.content_filter.user_bitmask ?? this.contentMaxBitmask;
+          this.civitaiNsfwLevel = String(userBm);
+        }
         if (cfg.auth_enabled !== undefined) {
           this.isAuthEnabled = cfg.auth_enabled;
         }
@@ -1227,11 +1343,15 @@ export class AppComponent implements OnInit, OnDestroy {
   loadModels() {
     this.generationService.getModels().subscribe({
       next: (data) => {
-        const checkpoints = data.checkpoints || [];
-        this.models = checkpoints.map((item: any) => {
+        const checkpoints = (data.checkpoints || []).map((item: any) => {
           if (typeof item === 'string') return { name: item, type: 'checkpoint' };
           return { name: item.name || item, type: item.type || 'checkpoint' };
         });
+        const diffusionModels = (data.diffusion_models || []).map((item: any) => ({
+          name: item.name || item,
+          type: 'diffusion_model',
+        }));
+        this.models = [...checkpoints, ...diffusionModels];
         if (!this.selectedModel && this.models.length > 0) {
           this.selectedModel = this.models[0].name;
         }
@@ -1875,6 +1995,97 @@ export class AppComponent implements OnInit, OnDestroy {
     return icons[icon] || '\u{1F4C1}';
   }
 
+  // ─── Model Override Modal ─────────────────────────────────────────────
+
+  handleOpenOverrideModal(item: InventoryItem) {
+    this.overrideModalItem = item;
+    this.overrideModalOpen = true;
+    this.overrideModalLoading = true;
+    this.overrideForm = {
+      architecture: '',
+      sampler: '',
+      scheduler: '',
+      steps: null,
+      cfg: null,
+      vae: '',
+      hidden: false,
+      notes: '',
+    };
+
+    if (this.overrideArchitectures.length === 0) {
+      this.generationService.getArchitectures().subscribe({
+        next: (res) => { this.overrideArchitectures = res.architectures || []; },
+        error: () => {},
+      });
+    }
+
+    this.generationService.getModelOverride(item.filename).subscribe({
+      next: (res) => {
+        if (res.override) {
+          const o = res.override;
+          this.overrideForm = {
+            architecture: o.architecture || '',
+            sampler: o.sampling?.sampler || '',
+            scheduler: o.sampling?.scheduler || '',
+            steps: o.sampling?.steps ?? null,
+            cfg: o.sampling?.cfg ?? null,
+            vae: o.vae || '',
+            hidden: !!o.hidden,
+            notes: o.notes || '',
+          };
+        }
+        this.overrideModalLoading = false;
+      },
+      error: () => { this.overrideModalLoading = false; },
+    });
+  }
+
+  handleSaveOverride() {
+    if (!this.overrideModalItem) return;
+    this.overrideModalSaving = true;
+
+    const sampling: Record<string, any> = {};
+    if (this.overrideForm.sampler) sampling['sampler'] = this.overrideForm.sampler;
+    if (this.overrideForm.scheduler) sampling['scheduler'] = this.overrideForm.scheduler;
+    if (this.overrideForm.steps != null) sampling['steps'] = this.overrideForm.steps;
+    if (this.overrideForm.cfg != null) sampling['cfg'] = this.overrideForm.cfg;
+
+    const data: Record<string, any> = {
+      architecture: this.overrideForm.architecture || null,
+      sampling,
+      vae: this.overrideForm.vae || null,
+      hidden: this.overrideForm.hidden,
+      notes: this.overrideForm.notes,
+    };
+
+    this.generationService.saveModelOverride(this.overrideModalItem.filename, data).subscribe({
+      next: () => {
+        this.overrideModalSaving = false;
+        this.overrideModalOpen = false;
+        this.overrideModalItem!.has_override = true;
+        this.showToast('Override guardado', 'success');
+        this.loadInventory();
+      },
+      error: () => {
+        this.overrideModalSaving = false;
+        this.showToast('Error guardando override', 'error');
+      },
+    });
+  }
+
+  handleDeleteOverride() {
+    if (!this.overrideModalItem) return;
+    this.generationService.deleteModelOverride(this.overrideModalItem.filename).subscribe({
+      next: () => {
+        this.overrideModalOpen = false;
+        this.overrideModalItem!.has_override = false;
+        this.showToast('Override eliminado', 'success');
+        this.loadInventory();
+      },
+      error: () => this.showToast('Error eliminando override', 'error'),
+    });
+  }
+
   // ─── Missing LoRAs Dialog ──────────────────────────────────────────────
 
   handleMissingLoras(missing: MissingLoraResult[]) {
@@ -2218,7 +2429,27 @@ export class AppComponent implements OnInit, OnDestroy {
     this.showToast('Prompt y parámetros aplicados', 'success');
   }
 
+  // ─── Model helpers ─────────────────────────────────────────────────
+
+  getModelsByType(type: string): Model[] {
+    return this.models.filter(m => m.type === type);
+  }
+
+  getSelectedModelType(): string | undefined {
+    const found = this.models.find(m => m.name === this.selectedModel);
+    return found?.type;
+  }
+
+  handleModelChange(name: string) {
+    this.selectedModel = name;
+    this.handleSaveSetting('checkpoint', name);
+  }
+
   // ─── NSFW Level Toggles ──────────────────────────────────────────────
+
+  isNsfwBitAllowed(bit: number): boolean {
+    return (this.contentMaxBitmask & bit) !== 0;
+  }
 
   hasNsfwBit(bit: number): boolean {
     const level = parseInt(this.civitaiNsfwLevel, 10) || 0;
@@ -2226,6 +2457,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   toggleNsfwBit(bit: number) {
+    if (!this.isNsfwBitAllowed(bit)) return;
     let level = parseInt(this.civitaiNsfwLevel, 10) || 0;
     level ^= bit;
     this.civitaiNsfwLevel = String(level);

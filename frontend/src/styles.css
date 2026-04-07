@@ -1142,6 +1142,33 @@ body {
 
 /* ─── NSFW Toggle Switches ───────────────────────────────────────────── */
 
+.content-filter-header {
+  margin-bottom: 8px;
+}
+
+.content-filter-badge {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 6px;
+}
+
+.content-filter-badge.level-1 {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+}
+
+.content-filter-badge.level-2 {
+  background: rgba(251, 191, 36, 0.15);
+  color: #fbbf24;
+}
+
+.content-filter-badge.level-0 {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+}
+
 .nsfw-toggles {
   display: flex;
   flex-direction: column;
@@ -1162,6 +1189,11 @@ body {
 
 .nsfw-toggle-row:last-child {
   border-bottom: none;
+}
+
+.nsfw-toggle-row.disabled {
+  opacity: 0.35;
+  pointer-events: none;
 }
 
 .nsfw-toggle-info {
@@ -1790,6 +1822,22 @@ body {
   white-space: nowrap;
 }
 
+.inv-arch-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  white-space: nowrap;
+}
+
+.inv-override-badge {
+  font-size: 11px;
+  color: #a78bfa;
+  cursor: help;
+}
+
 .inv-item-size {
   font-size: 11px;
   color: var(--text-secondary);
@@ -1811,6 +1859,143 @@ body {
   text-align: center;
   font-size: 13px;
   color: var(--text-secondary);
+}
+
+/* ─── Model Override Modal ─────────────────────────────────────── */
+
+.override-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  animation: fadeIn 0.2s ease;
+}
+
+.override-dialog {
+  background: var(--bg-card);
+  border-radius: 16px;
+  width: 100%;
+  max-width: 500px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  border: 1px solid var(--border-color);
+}
+
+.override-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.override-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.override-body {
+  padding: 16px 20px;
+  overflow-y: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.override-filename {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: monospace;
+  word-break: break-all;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 6px;
+}
+
+.override-detected {
+  font-size: 13px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.override-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+
+.override-field label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.override-field textarea {
+  resize: vertical;
+}
+
+.override-row {
+  display: flex;
+  gap: 12px;
+}
+
+.override-checkbox {
+  flex-direction: row;
+  align-items: center;
+}
+
+.override-checkbox label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.override-checkbox input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: #818cf8;
+}
+
+.override-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border-color);
+}
+
+.override-footer-spacer {
+  flex: 1;
+}
+
+.btn-danger {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.btn-danger:hover {
+  background: rgba(239, 68, 68, 0.25);
 }
 
 /* ─── Missing LoRAs Dialog ─────────────────────────────────────── */

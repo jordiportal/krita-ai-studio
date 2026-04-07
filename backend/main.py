@@ -28,8 +28,14 @@ from pydantic import BaseModel
 import httpx
 import jwt
 
-from workflow_krita import create_txt2img_workflow_krita, create_txt2video_workflow, parse_lora_tags, resolve_lora_filename
-from civitai import router as civitai_router, configure as configure_civitai
+from workflow_krita import (
+    build_txt2img_workflow,
+    build_txt2video_workflow,
+    parse_lora_tags,
+    resolve_lora_filename,
+)
+from architectures import get_arch_manager
+from civitai import router as civitai_router, configure as configure_civitai, get_content_filter_info
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DB_PATH = DATA_DIR / "krita_ai.db"
@@ -94,6 +100,18 @@ def init_db():
         )
     """)
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS model_overrides (
+            filename     TEXT PRIMARY KEY,
+            architecture TEXT,
+            sampling     TEXT DEFAULT '{}',
+            clip         TEXT DEFAULT '{}',
+            vae          TEXT,
+            hidden       INTEGER DEFAULT 0,
+            notes        TEXT DEFAULT ''
+        )
+    """)
+
     # Migration: add missing columns to existing gallery table
     try:
         conn.execute("ALTER TABLE gallery ADD COLUMN seed INTEGER NOT NULL DEFAULT 0")
@@ -146,7 +164,7 @@ def init_db():
         "auth_pass": "",
         "jwt_secret": "",
         "civitai_api_key": "",
-        "civitai_nsfw_level": "31",
+        "civitai_nsfw_level": "",
     }
     for k, v in config_defaults.items():
         conn.execute(
@@ -370,6 +388,7 @@ class GenerationRequest(BaseModel):
     sampler: str = ""
     scheduler: str = ""
     checkpoint: Optional[str] = None
+    model_type: Optional[str] = None  # "checkpoint" or "diffusion_model"
     strength: float = 1.0
 
 
@@ -523,7 +542,14 @@ async def api_get_config():
     if safe_cfg.get("auth_pass"):
         safe_cfg["auth_pass"] = "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"
     safe_cfg.pop("jwt_secret", None)
+    safe_cfg.pop("civitai_nsfw_level", None)
+    safe_cfg["content_filter"] = get_content_filter_info()
     return safe_cfg
+
+
+@app.get("/api/content-filter")
+async def api_content_filter():
+    return get_content_filter_info()
 
 
 @app.post("/api/config")
@@ -702,13 +728,11 @@ async def health_check():
 @app.get("/api/models")
 async def get_models():
     """
-    Lista modelos disponibles.
-    Intenta usar el plugin comfyui-kas para obtener todos los tipos (checkpoints, loras, etc.)
-    Fallback a object_info/CheckpointLoaderSimple si el plugin no esta disponible.
+    Lista modelos disponibles, filtrando los ocultos via architectures.json.
     """
     comfy_url = get_comfyui_url()
+    arch_mgr = get_arch_manager()
 
-    # Intentar usar el plugin comfyui-kas primero
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
@@ -719,10 +743,15 @@ async def get_models():
                 data = resp.json()
                 models = data.get("models", {})
 
-                # Transformar al formato esperado por el frontend
                 checkpoints = [
                     {"name": m["filename"], "type": "checkpoint", **m}
                     for m in models.get("checkpoints", [])
+                    if not arch_mgr.is_hidden_from(m["filename"], "image_generation")
+                ]
+                diffusion_models = [
+                    {"name": m["filename"], "type": "diffusion_model", **m}
+                    for m in models.get("diffusion_models", [])
+                    if not arch_mgr.is_hidden_from(m["filename"], "image_generation")
                 ]
                 loras = [
                     {"name": m["filename"], "type": "lora", **m}
@@ -735,6 +764,7 @@ async def get_models():
 
                 return {
                     "checkpoints": checkpoints,
+                    "diffusion_models": diffusion_models,
                     "loras": loras,
                     "controlnets": controlnets,
                     "via_plugin": True,
@@ -742,7 +772,6 @@ async def get_models():
     except Exception as e:
         print(f"[models] Plugin no disponible ({e}), usando fallback")
 
-    # Fallback: object_info/CheckpointLoaderSimple (solo checkpoints)
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(
@@ -868,6 +897,8 @@ async def get_inventory():
     except Exception as e:
         return {"error": f"No se pudo conectar al plugin KAS: {e}", "categories": []}
 
+    arch_mgr = get_arch_manager()
+
     # Construir categorías
     categories = []
     total_size = 0
@@ -886,11 +917,18 @@ async def get_inventory():
                 civitai_info = civitai_map.get(fname)
                 base_model = _detect_base_model(fname)
 
+                arch_id = arch_mgr.detect(fname)
+                arch_label = arch_mgr.architectures.get(arch_id, {}).get("label", arch_id)
+                override = arch_mgr.get_override(fname)
+
                 item = {
                     "filename": fname,
                     "folder": folder_name,
                     "size_bytes": size,
                     "base_model": base_model,
+                    "architecture": arch_id,
+                    "architecture_label": arch_label,
+                    "has_override": override is not None,
                     "from_civitai": civitai_info is not None,
                     "civitai_name": civitai_info["name"] if civitai_info else None,
                     "civitai_model_id": civitai_info["civitai_model_id"] if civitai_info else None,
@@ -951,6 +989,68 @@ async def delete_inventory_model(folder: str, filename: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# ─── Architecture Config Endpoints ────────────────────────────────────────────
+
+@app.get("/api/architectures")
+async def get_architectures():
+    """List all architecture definitions from architectures.json."""
+    arch_mgr = get_arch_manager()
+    return {"architectures": arch_mgr.list_architectures()}
+
+
+@app.get("/api/architectures/detect/{filename:path}")
+async def detect_architecture(filename: str):
+    """Detect architecture for a given model filename."""
+    arch_mgr = get_arch_manager()
+    arch_id = arch_mgr.detect(filename)
+    config = arch_mgr.resolve(filename)
+    return {"filename": filename, "architecture": arch_id, "config": config}
+
+
+@app.get("/api/model-overrides")
+async def list_model_overrides():
+    """List all model overrides."""
+    arch_mgr = get_arch_manager()
+    return {"overrides": arch_mgr.list_overrides()}
+
+
+@app.get("/api/model-overrides/{filename:path}")
+async def get_model_override(filename: str):
+    """Get override for a specific model."""
+    arch_mgr = get_arch_manager()
+    override = arch_mgr.get_override(filename)
+    if override is None:
+        return {"filename": filename, "override": None}
+    return {"filename": filename, "override": override}
+
+
+@app.post("/api/model-overrides/{filename:path}")
+async def save_model_override(filename: str, request: Request):
+    """Save/update override for a model."""
+    data = await request.json()
+    arch_mgr = get_arch_manager()
+    arch_mgr.save_override(filename, data)
+    return {"status": "ok", "filename": filename}
+
+
+@app.delete("/api/model-overrides/{filename:path}")
+async def delete_model_override(filename: str):
+    """Delete override for a model."""
+    arch_mgr = get_arch_manager()
+    deleted = arch_mgr.delete_override(filename)
+    return {"status": "ok", "deleted": deleted}
+
+
+@app.post("/api/architectures/reload")
+async def reload_architectures():
+    """Reload architectures.json from disk."""
+    arch_mgr = get_arch_manager()
+    arch_mgr.reload()
+    return {"status": "ok", "count": len(arch_mgr.architectures)}
+
+
+# ─── LoRA Search ──────────────────────────────────────────────────────────────
 
 async def _search_civitai_lora(name: str, limit: int = 5) -> List[Dict[str, Any]]:
     """Busca LoRAs en CivitAI por nombre y retorna candidatos simplificados."""
@@ -1149,10 +1249,21 @@ async def txt2img(request: GenerationRequest):
                     missing_loras=candidates_list,
                 )
 
-        workflow = create_txt2img_workflow_krita(
-            prompt=clean_prompt if lora_tags else request.prompt,
+        prompt_text = clean_prompt if lora_tags else request.prompt
+        model_name = request.checkpoint or "SDXL.safetensors"
+
+        arch_mgr = get_arch_manager()
+        arch_config = arch_mgr.resolve(model_name)
+        arch_id = arch_config.get("_arch_id", "sd15")
+
+        print(f"[txt2img] model={model_name}, arch={arch_id}, loader={arch_config.get('loader')}")
+        print(f"[txt2img] size={request.width}x{request.height}, steps={request.steps}, cfg={request.cfg_scale}, sampler={request.sampler}")
+
+        workflow = build_txt2img_workflow(
+            arch_config=arch_config,
+            prompt=prompt_text,
             negative_prompt=request.negative_prompt or "",
-            checkpoint=request.checkpoint or "SDXL.safetensors",
+            model_name=model_name,
             sampler=request.sampler or "",
             scheduler=request.scheduler or "",
             steps=request.steps,
@@ -1163,7 +1274,7 @@ async def txt2img(request: GenerationRequest):
             batch_size=1,
             loras=resolved_loras if resolved_loras else None,
         )
-        print(f"Generating with seed={actual_seed}")
+        print(f"[txt2img] Workflow built: arch={arch_id}, nodes={list(workflow.keys())}, seed={actual_seed}")
 
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -1418,12 +1529,16 @@ async def txt2video(request: GenerationVideoRequest):
         req_checkpoint = request.checkpoint or ""
         video_checkpoint = req_checkpoint if req_checkpoint in available_unets else VIDEO_UNET_DEFAULT
 
-        workflow = create_txt2video_workflow(
+        arch_mgr = get_arch_manager()
+        video_arch_config = arch_mgr.resolve(video_checkpoint)
+
+        workflow = build_txt2video_workflow(
+            arch_config=video_arch_config,
             prompt=request.prompt,
             negative_prompt=request.negative_prompt or "",
-            checkpoint=video_checkpoint,
-            vae=request.vae or "wan_2.1_vae.safetensors",
-            clip=request.clip or "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+            model_name=video_checkpoint,
+            vae_override=request.vae or "",
+            clip_override=request.clip or "",
             sampler=request.sampler or "",
             scheduler=request.scheduler or "",
             steps=request.steps or 20,
@@ -1435,11 +1550,7 @@ async def txt2video(request: GenerationVideoRequest):
             fps=request.fps,
             batch_size=1,
         )
-        print(f"Generating video with seed={actual_seed}, length={request.length}, unet={video_checkpoint}, clip={request.clip or 'umt5_xxl_fp8_e4m3fn_scaled.safetensors'}")
-        import json as _json
-        print(f"[txt2video] Workflow nodes: {list(workflow.keys())}")
-        for nid, node in workflow.items():
-            print(f"  [{nid}] {node.get('class_type','?')}: {_json.dumps(node.get('inputs',{}), default=str)[:200]}")
+        print(f"[txt2video] arch={video_arch_config.get('_arch_id')}, unet={video_checkpoint}, seed={actual_seed}, length={request.length}")
 
         async with httpx.AsyncClient() as client:
             response = await client.post(

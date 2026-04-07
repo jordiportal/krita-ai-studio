@@ -15,6 +15,9 @@ import {
   GalleryResponse,
   CacheResponse,
   InventoryResponse,
+  ArchitecturesResponse,
+  ModelOverrideResponse,
+  ModelOverridesListResponse,
 } from './types';
 
 @Injectable({
@@ -151,5 +154,25 @@ export class GenerationService {
 
   deleteInventoryModel(folder: string, filename: string): Observable<any> {
     return this.http.delete(`${this.apiUrl}/inventory/${encodeURIComponent(folder)}/${encodeURIComponent(filename)}`);
+  }
+
+  getArchitectures(): Observable<ArchitecturesResponse> {
+    return this.http.get<ArchitecturesResponse>(`${this.apiUrl}/architectures`);
+  }
+
+  getModelOverride(filename: string): Observable<ModelOverrideResponse> {
+    return this.http.get<ModelOverrideResponse>(`${this.apiUrl}/model-overrides/${encodeURIComponent(filename)}`);
+  }
+
+  saveModelOverride(filename: string, data: Record<string, any>): Observable<any> {
+    return this.http.post(`${this.apiUrl}/model-overrides/${encodeURIComponent(filename)}`, data);
+  }
+
+  deleteModelOverride(filename: string): Observable<any> {
+    return this.http.delete(`${this.apiUrl}/model-overrides/${encodeURIComponent(filename)}`);
+  }
+
+  getModelOverrides(): Observable<ModelOverridesListResponse> {
+    return this.http.get<ModelOverridesListResponse>(`${this.apiUrl}/model-overrides`);
   }
 }
