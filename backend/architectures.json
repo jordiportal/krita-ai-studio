@@ -231,11 +231,13 @@
       "weight_dtype": "default",
       "latent_node": "WanImageToVideo",
       "guidance": { "type": "cfg" },
+      "model_sampling_shift": 5.0,
+      "video_webp_lossless": true,
       "sampling": {
-        "sampler": "euler_ancestral",
-        "scheduler": "normal",
+        "sampler": "euler",
+        "scheduler": "simple",
         "steps": 20,
-        "cfg": 7.0
+        "cfg": 1.0
       },
       "prompt": {
         "style": "{prompt}",

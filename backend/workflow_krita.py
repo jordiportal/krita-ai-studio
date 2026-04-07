@@ -8,7 +8,7 @@ Main entry point: build_txt2img_workflow(arch_config, prompt, ...)
 """
 
 import re
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 
 from architectures import get_arch_manager
 
@@ -366,6 +366,7 @@ def build_txt2video_workflow(
     prompt: str,
     negative_prompt: str = "",
     model_name: str = "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
+    low_noise_model: Optional[str] = None,
     vae_override: str = "",
     clip_override: str = "",
     sampler: str = "",
@@ -378,15 +379,30 @@ def build_txt2video_workflow(
     length: int = 81,
     fps: float = 8.0,
     batch_size: int = 1,
+    loras: List[Tuple[str, float, float]] | None = None,
 ) -> Dict[str, Any]:
     """
-    Text-to-video workflow (Wan 2.x). Uses arch_config for defaults.
+    Wan 2.x T2V alineado con el blueprint oficial de ComfyUI:
+    - ModelSamplingSD3 (flow matching, shift ~5)
+    - Dos fases high_noise + low_noise cuando existe el UNet low en disco
+    - SplitSigmas + segunda pasada con DisableNoise (sin reinyectar ruido)
+    - WEBP sin pérdida por defecto (menos bandas de color)
     """
     sampling = arch_config.get("sampling", {})
-    actual_sampler = sampler if sampler else sampling.get("sampler", "euler_ancestral")
-    actual_scheduler = scheduler if scheduler else sampling.get("scheduler", "normal")
+    actual_sampler = sampler if sampler else sampling.get("sampler", "euler")
+    actual_scheduler = scheduler if scheduler else sampling.get("scheduler", "simple")
     actual_steps = steps if steps > 0 else sampling.get("steps", 20)
-    actual_cfg = cfg if cfg > 0 else sampling.get("cfg", 7.0)
+    actual_cfg = cfg if cfg > 0 else float(sampling.get("cfg", 1.0))
+
+    shift = float(arch_config.get("model_sampling_shift", 5.0))
+    webp_lossless = bool(arch_config.get("video_webp_lossless", True))
+
+    dual_stage = (
+        low_noise_model is not None
+        and low_noise_model != model_name
+        and actual_steps >= 2
+    )
+    split_step = max(1, min(actual_steps - 1, actual_steps // 2))
 
     clip_cfg = arch_config.get("clip", {})
     clip_name = clip_override or clip_cfg.get("clip1", "umt5_xxl_fp8_e4m3fn_scaled.safetensors")
@@ -395,17 +411,17 @@ def build_txt2video_workflow(
     workflow: Dict[str, Any] = {}
     node_id = 1
 
-    # ── 1. UNETLoader ──
-    unet_id = str(node_id)
-    workflow[unet_id] = {
-        "_meta": {"title": "Wan UNET"},
+    # ── 1. UNETLoader (high / único) ──
+    unet_high_id = str(node_id)
+    workflow[unet_high_id] = {
+        "_meta": {"title": "Wan UNET (high)"},
         "inputs": {
             "unet_name": model_name,
             "weight_dtype": arch_config.get("weight_dtype", "default"),
         },
         "class_type": "UNETLoader",
     }
-    model_ref = [unet_id, 0]
+    model_ref = [unet_high_id, 0]
     node_id += 1
 
     # ── 2. CLIPLoader ──
@@ -431,7 +447,58 @@ def build_txt2video_workflow(
     vae_ref = [vae_id, 0]
     node_id += 1
 
-    # ── 4. CLIPTextEncode (Positive) ──
+    # ── LoRA Loaders (modelo high + clip) ──
+    if loras:
+        for lora_filename, strength_model, strength_clip in loras:
+            lora_id = str(node_id)
+            workflow[lora_id] = {
+                "_meta": {"title": f"LoRA: {lora_filename}"},
+                "inputs": {
+                    "lora_name": lora_filename,
+                    "strength_model": strength_model,
+                    "strength_clip": strength_clip,
+                    "model": model_ref,
+                    "clip": clip_ref,
+                },
+                "class_type": "LoraLoader",
+            }
+            model_ref = [lora_id, 0]
+            clip_ref = [lora_id, 1]
+            node_id += 1
+
+    # ── ModelSamplingSD3 sobre UNet high (después de LoRAs) ──
+    ms_high_id = str(node_id)
+    workflow[ms_high_id] = {
+        "_meta": {"title": "ModelSamplingSD3 (high)"},
+        "inputs": {"model": model_ref, "shift": shift},
+        "class_type": "ModelSamplingSD3",
+    }
+    model_high_samp = [ms_high_id, 0]
+    node_id += 1
+
+    if dual_stage:
+        unet_low_id = str(node_id)
+        workflow[unet_low_id] = {
+            "_meta": {"title": "Wan UNET (low)"},
+            "inputs": {
+                "unet_name": low_noise_model,
+                "weight_dtype": arch_config.get("weight_dtype", "default"),
+            },
+            "class_type": "UNETLoader",
+        }
+        model_low_raw = [unet_low_id, 0]
+        node_id += 1
+
+        ms_low_id = str(node_id)
+        workflow[ms_low_id] = {
+            "_meta": {"title": "ModelSamplingSD3 (low)"},
+            "inputs": {"model": model_low_raw, "shift": shift},
+            "class_type": "ModelSamplingSD3",
+        }
+        model_low_samp = [ms_low_id, 0]
+        node_id += 1
+
+    # ── CLIPTextEncode ──
     positive_id = str(node_id)
     workflow[positive_id] = {
         "_meta": {"title": "Positive Prompt"},
@@ -441,7 +508,6 @@ def build_txt2video_workflow(
     positive_ref = [positive_id, 0]
     node_id += 1
 
-    # ── 5. CLIPTextEncode (Negative) ──
     negative_id = str(node_id)
     workflow[negative_id] = {
         "_meta": {"title": "Negative Prompt"},
@@ -454,7 +520,7 @@ def build_txt2video_workflow(
     negative_ref = [negative_id, 0]
     node_id += 1
 
-    # ── 6. WanImageToVideo ──
+    # ── WanImageToVideo ──
     wan_latent_id = str(node_id)
     workflow[wan_latent_id] = {
         "_meta": {"title": "Wan T2V Latent"},
@@ -474,7 +540,7 @@ def build_txt2video_workflow(
     negative_cond_ref = [wan_latent_id, 1]
     node_id += 1
 
-    # ── 7. RandomNoise ──
+    # ── RandomNoise + KSamplerSelect ──
     noise_id = str(node_id)
     workflow[noise_id] = {
         "_meta": {"title": "Random Noise"},
@@ -484,7 +550,6 @@ def build_txt2video_workflow(
     noise_ref = [noise_id, 0]
     node_id += 1
 
-    # ── 8. KSamplerSelect ──
     sampler_select_id = str(node_id)
     workflow[sampler_select_id] = {
         "_meta": {"title": "Sampler"},
@@ -494,53 +559,142 @@ def build_txt2video_workflow(
     sampler_ref = [sampler_select_id, 0]
     node_id += 1
 
-    # ── 9. BasicScheduler ──
-    scheduler_id = str(node_id)
-    workflow[scheduler_id] = {
-        "_meta": {"title": "Scheduler"},
-        "inputs": {
-            "model": model_ref,
-            "scheduler": actual_scheduler,
-            "steps": actual_steps,
-            "denoise": 1.0,
-        },
-        "class_type": "BasicScheduler",
-    }
-    sigmas_ref = [scheduler_id, 0]
-    node_id += 1
+    if dual_stage:
+        sched_id = str(node_id)
+        workflow[sched_id] = {
+            "_meta": {"title": "Scheduler"},
+            "inputs": {
+                "model": model_high_samp,
+                "scheduler": actual_scheduler,
+                "steps": actual_steps,
+                "denoise": 1.0,
+            },
+            "class_type": "BasicScheduler",
+        }
+        sigmas_full_ref = [sched_id, 0]
+        node_id += 1
 
-    # ── 10. CFGGuider ──
-    guider_id = str(node_id)
-    workflow[guider_id] = {
-        "_meta": {"title": "CFG Guider"},
-        "inputs": {
-            "model": model_ref,
-            "positive": positive_cond_ref,
-            "negative": negative_cond_ref,
-            "cfg": actual_cfg,
-        },
-        "class_type": "CFGGuider",
-    }
-    guider_ref = [guider_id, 0]
-    node_id += 1
+        split_id = str(node_id)
+        workflow[split_id] = {
+            "_meta": {"title": "SplitSigmas"},
+            "inputs": {"sigmas": sigmas_full_ref, "step": split_step},
+            "class_type": "SplitSigmas",
+        }
+        sigmas_high_ref = [split_id, 0]
+        sigmas_low_ref = [split_id, 1]
+        node_id += 1
 
-    # ── 11. SamplerCustomAdvanced ──
-    sampler_adv_id = str(node_id)
-    workflow[sampler_adv_id] = {
-        "_meta": {"title": "Sampler Advanced"},
-        "inputs": {
-            "noise": noise_ref,
-            "guider": guider_ref,
-            "sampler": sampler_ref,
-            "sigmas": sigmas_ref,
-            "latent_image": latent_ref,
-        },
-        "class_type": "SamplerCustomAdvanced",
-    }
-    sampler_output_ref = [sampler_adv_id, 1]
-    node_id += 1
+        guider_h_id = str(node_id)
+        workflow[guider_h_id] = {
+            "_meta": {"title": "CFG Guider (high)"},
+            "inputs": {
+                "model": model_high_samp,
+                "positive": positive_cond_ref,
+                "negative": negative_cond_ref,
+                "cfg": actual_cfg,
+            },
+            "class_type": "CFGGuider",
+        }
+        guider_high_ref = [guider_h_id, 0]
+        node_id += 1
 
-    # ── 12. VAEDecode ──
+        samp1_id = str(node_id)
+        workflow[samp1_id] = {
+            "_meta": {"title": "Sampler stage 1 (high noise)"},
+            "inputs": {
+                "noise": noise_ref,
+                "guider": guider_high_ref,
+                "sampler": sampler_ref,
+                "sigmas": sigmas_high_ref,
+                "latent_image": latent_ref,
+            },
+            "class_type": "SamplerCustomAdvanced",
+        }
+        latent_after_high = [samp1_id, 0]
+        node_id += 1
+
+        disable_noise_id = str(node_id)
+        workflow[disable_noise_id] = {
+            "_meta": {"title": "DisableNoise"},
+            "inputs": {},
+            "class_type": "DisableNoise",
+        }
+        empty_noise_ref = [disable_noise_id, 0]
+        node_id += 1
+
+        guider_l_id = str(node_id)
+        workflow[guider_l_id] = {
+            "_meta": {"title": "CFG Guider (low)"},
+            "inputs": {
+                "model": model_low_samp,
+                "positive": positive_cond_ref,
+                "negative": negative_cond_ref,
+                "cfg": actual_cfg,
+            },
+            "class_type": "CFGGuider",
+        }
+        guider_low_ref = [guider_l_id, 0]
+        node_id += 1
+
+        samp2_id = str(node_id)
+        workflow[samp2_id] = {
+            "_meta": {"title": "Sampler stage 2 (low noise)"},
+            "inputs": {
+                "noise": empty_noise_ref,
+                "guider": guider_low_ref,
+                "sampler": sampler_ref,
+                "sigmas": sigmas_low_ref,
+                "latent_image": latent_after_high,
+            },
+            "class_type": "SamplerCustomAdvanced",
+        }
+        sampler_output_ref = [samp2_id, 0]
+        node_id += 1
+    else:
+        sched_id = str(node_id)
+        workflow[sched_id] = {
+            "_meta": {"title": "Scheduler"},
+            "inputs": {
+                "model": model_high_samp,
+                "scheduler": actual_scheduler,
+                "steps": actual_steps,
+                "denoise": 1.0,
+            },
+            "class_type": "BasicScheduler",
+        }
+        sigmas_ref = [sched_id, 0]
+        node_id += 1
+
+        guider_id = str(node_id)
+        workflow[guider_id] = {
+            "_meta": {"title": "CFG Guider"},
+            "inputs": {
+                "model": model_high_samp,
+                "positive": positive_cond_ref,
+                "negative": negative_cond_ref,
+                "cfg": actual_cfg,
+            },
+            "class_type": "CFGGuider",
+        }
+        guider_ref = [guider_id, 0]
+        node_id += 1
+
+        samp_id = str(node_id)
+        workflow[samp_id] = {
+            "_meta": {"title": "Sampler Advanced"},
+            "inputs": {
+                "noise": noise_ref,
+                "guider": guider_ref,
+                "sampler": sampler_ref,
+                "sigmas": sigmas_ref,
+                "latent_image": latent_ref,
+            },
+            "class_type": "SamplerCustomAdvanced",
+        }
+        sampler_output_ref = [samp_id, 0]
+        node_id += 1
+
+    # ── VAEDecode ──
     decode_id = str(node_id)
     workflow[decode_id] = {
         "_meta": {"title": "VAE Decode"},
@@ -550,17 +704,18 @@ def build_txt2video_workflow(
     frames_ref = [decode_id, 0]
     node_id += 1
 
-    # ── 13. KAS_SaveVideoCache ──
-    video_cache_id = str(node_id)
-    workflow[video_cache_id] = {
-        "_meta": {"title": "Save Video Cache"},
+    save_id = str(node_id)
+    workflow[save_id] = {
+        "_meta": {"title": "Save Video"},
         "inputs": {
             "images": frames_ref,
+            "filename_prefix": "KAS_video",
             "fps": fps,
-            "format": "webm",
-            "quality": "medium",
+            "lossless": webp_lossless,
+            "quality": 100 if webp_lossless else 90,
+            "method": "default",
         },
-        "class_type": "KAS_SaveVideoCache",
+        "class_type": "SaveAnimatedWEBP",
     }
 
     return workflow

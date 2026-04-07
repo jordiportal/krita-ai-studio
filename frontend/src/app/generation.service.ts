@@ -175,4 +175,8 @@ export class GenerationService {
   getModelOverrides(): Observable<ModelOverridesListResponse> {
     return this.http.get<ModelOverridesListResponse>(`${this.apiUrl}/model-overrides`);
   }
+
+  getVideoModels(): Observable<{ models: import('./types').VideoModel[] }> {
+    return this.http.get<{ models: import('./types').VideoModel[] }>(`${this.apiUrl}/video-models`);
+  }
 }

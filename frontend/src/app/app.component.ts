@@ -7,7 +7,7 @@ import { AuthService } from './auth.service';
 import {
   Model, GenerationRequest, GenerationVideoRequest, Settings, ComfyConfig,
   ConnectionTestResult, GalleryItem, CachedModel, ModelTypeOption,
-  InventoryCategory, InventoryItem, Architecture,
+  InventoryCategory, InventoryItem, Architecture, VideoModel,
   MissingLoraResult, MissingLoraCandidate,
 } from './types';
 
@@ -88,21 +88,73 @@ import {
               <button
                 class="mode-btn"
                 [class.active]="generationMode === 'image'"
-                (click)="generationMode = 'image'">
+                (click)="setGenerationMode('image')">
                 \ud83d\uddbc\ufe0f Imagen
               </button>
               <button
                 class="mode-btn"
                 [class.active]="generationMode === 'video'"
-                (click)="generationMode = 'video'">
+                (click)="setGenerationMode('video')">
                 \ud83c\udfa5 Video
               </button>
             </div>
           </div>
 
+          <!-- Image: modelo + resoluci&oacute;n (mismo patr&oacute;n que v&iacute;deo) -->
+          <div class="input-group" *ngIf="generationMode === 'image'">
+            <label>Modelo</label>
+            <select class="input-field" [(ngModel)]="selectedModel" (ngModelChange)="handleModelChange($event)">
+              <optgroup label="Checkpoints" *ngIf="getModelsByType('checkpoint').length > 0">
+                <option *ngFor="let model of getModelsByType('checkpoint')" [value]="model.name">{{ model.name }}</option>
+              </optgroup>
+              <optgroup label="Diffusion Models" *ngIf="getModelsByType('diffusion_model').length > 0">
+                <option *ngFor="let model of getModelsByType('diffusion_model')" [value]="model.name">{{ model.name }}</option>
+              </optgroup>
+              <option *ngIf="models.length === 0" value="">Cargando...</option>
+            </select>
+          </div>
+
+          <div class="input-group" *ngIf="generationMode === 'image'">
+            <label>Resoluci&oacute;n</label>
+            <div class="resolution-presets">
+              <button type="button" class="preset-btn" [class.active]="imageResolutionPreset === '832x480'"
+                      (click)="handleImageResolutionPreset('832x480')">832&times;480 <span class="preset-label">Landscape</span></button>
+              <button type="button" class="preset-btn" [class.active]="imageResolutionPreset === '480x832'"
+                      (click)="handleImageResolutionPreset('480x832')">480&times;832 <span class="preset-label">Portrait</span></button>
+              <button type="button" class="preset-btn" [class.active]="imageResolutionPreset === '640x640'"
+                      (click)="handleImageResolutionPreset('640x640')">640&times;640 <span class="preset-label">Square</span></button>
+              <button type="button" class="preset-btn" [class.active]="imageResolutionPreset === '1280x720'"
+                      (click)="handleImageResolutionPreset('1280x720')">1280&times;720 <span class="preset-label">HD</span></button>
+            </div>
+          </div>
+
           <!-- Video Settings (only in video mode) -->
           <div class="input-group" *ngIf="generationMode === 'video'">
-            <label>Duraci\u00f3n: {{ videoLength }} frames</label>
+            <label>Modelo de v&iacute;deo</label>
+            <select class="input-field" [(ngModel)]="selectedVideoModel">
+              <option value="">Auto (Wan 2.2 14B)</option>
+              <option *ngFor="let vm of videoModels" [value]="vm.filename">
+                {{ vm.filename }} ({{ vm.architecture_label }})
+              </option>
+            </select>
+          </div>
+
+          <div class="input-group" *ngIf="generationMode === 'video'">
+            <label>Resoluci&oacute;n</label>
+            <div class="resolution-presets">
+              <button class="preset-btn" [class.active]="videoResolutionPreset === '832x480'"
+                      (click)="handleVideoResolutionPreset('832x480')">832&times;480 <span class="preset-label">Landscape</span></button>
+              <button class="preset-btn" [class.active]="videoResolutionPreset === '480x832'"
+                      (click)="handleVideoResolutionPreset('480x832')">480&times;832 <span class="preset-label">Portrait</span></button>
+              <button class="preset-btn" [class.active]="videoResolutionPreset === '640x640'"
+                      (click)="handleVideoResolutionPreset('640x640')">640&times;640 <span class="preset-label">Square</span></button>
+              <button class="preset-btn" [class.active]="videoResolutionPreset === '1280x720'"
+                      (click)="handleVideoResolutionPreset('1280x720')">1280&times;720 <span class="preset-label">HD</span></button>
+            </div>
+          </div>
+
+          <div class="input-group" *ngIf="generationMode === 'video'">
+            <label>Duraci&oacute;n: {{ videoLength }} frames</label>
             <div class="slider-container">
               <input type="range" min="21" max="161" step="4" [(ngModel)]="videoLength">
               <span class="slider-value">{{ videoLength }}</span>
@@ -131,8 +183,11 @@ import {
             (click)="handleGenerate()"
             [disabled]="generating || !comfyOnline">
             <span *ngIf="generating" class="spinner"></span>
-            <span>{{ generating ? 'Generando...' : (generationMode === 'video' ? 'Generar Video' : 'Generar Imagen') }}</span>
+            <span>{{ generating ? ('Generando... ' + (generationProgress > 0 ? generationProgress + '%' : '')) : (generationMode === 'video' ? 'Generar Video' : 'Generar Imagen') }}</span>
           </button>
+          <div class="progress-bar-container" *ngIf="generating && generationProgress > 0">
+            <div class="progress-bar-fill" [style.width.%]="generationProgress"></div>
+          </div>
         </div>
 
         <!-- Advanced options -->
@@ -159,19 +214,6 @@ import {
 
             <div class="settings-grid">
               <div class="input-group">
-                <label>Modelo</label>
-                <select class="select-field" [(ngModel)]="selectedModel" (ngModelChange)="handleModelChange($event)">
-                  <optgroup label="Checkpoints" *ngIf="getModelsByType('checkpoint').length > 0">
-                    <option *ngFor="let model of getModelsByType('checkpoint')" [value]="model.name">{{ model.name }}</option>
-                  </optgroup>
-                  <optgroup label="Diffusion Models" *ngIf="getModelsByType('diffusion_model').length > 0">
-                    <option *ngFor="let model of getModelsByType('diffusion_model')" [value]="model.name">{{ model.name }}</option>
-                  </optgroup>
-                  <option *ngIf="models.length === 0" value="">Cargando...</option>
-                </select>
-              </div>
-
-              <div class="input-group">
                 <label>Sampler</label>
                 <select class="select-field" [(ngModel)]="sampler" (ngModelChange)="handleSaveSetting('sampler', $event)">
                   <option value="">Auto</option>
@@ -191,28 +233,6 @@ import {
                 <div class="slider-container">
                   <input type="range" min="0" max="20" step="0.5" [(ngModel)]="cfg" (change)="handleSaveSetting('cfg', cfg)">
                 </div>
-              </div>
-
-              <div class="input-group">
-                <label>Ancho</label>
-                <select class="select-field" [(ngModel)]="width" (ngModelChange)="handleSaveSetting('width', $event)">
-                  <option [ngValue]="512">512</option>
-                  <option [ngValue]="768">768</option>
-                  <option [ngValue]="1024">1024</option>
-                  <option [ngValue]="1280">1280</option>
-                  <option [ngValue]="1536">1536</option>
-                </select>
-              </div>
-
-              <div class="input-group">
-                <label>Alto</label>
-                <select class="select-field" [(ngModel)]="height" (ngModelChange)="handleSaveSetting('height', $event)">
-                  <option [ngValue]="512">512</option>
-                  <option [ngValue]="768">768</option>
-                  <option [ngValue]="1024">1024</option>
-                  <option [ngValue]="1280">1280</option>
-                  <option [ngValue]="1536">1536</option>
-                </select>
               </div>
             </div>
           </div>
@@ -235,17 +255,12 @@ import {
           <h3 class="card-subtitle">Video generado</h3>
           <div class="video-results">
             <div *ngFor="let videoId of generatedVideos; let i = index" class="video-container">
-              <video
-                [src]="getVideoUrl(videoId)"
-                controls
-                autoplay
-                loop
-                muted
-                playsinline
-                class="generated-video">
-              </video>
+              <img
+                [src]="getImageUrl(videoId)"
+                class="generated-video"
+                alt="Video generado">
               <div class="video-actions">
-                <a [href]="getVideoUrl(videoId)" download class="btn btn-secondary btn-small">
+                <a [href]="getImageUrl(videoId)" download class="btn btn-secondary btn-small">
                   Descargar video
                 </a>
               </div>
@@ -279,6 +294,9 @@ import {
               [alt]="item.prompt"
               loading="lazy">
             <div class="gallery-thumb-overlay">
+              <div class="gallery-badge-row">
+                <span class="video-badge" *ngIf="item.type === 'video'">&#9654; Video</span>
+              </div>
               <span class="gallery-thumb-time">{{ formatTime(item.created_at) }}</span>
             </div>
           </div>
@@ -635,7 +653,7 @@ import {
                     <span class="inv-item-name">{{ item.civitai_name || item.filename }}</span>
                     <div class="inv-item-meta">
                       <span class="inv-arch-badge" *ngIf="item.architecture">{{ item.architecture_label || item.architecture }}</span>
-                      <span class="inv-base-badge" *ngIf="item.base_model && !item.architecture">{{ item.base_model }}</span>
+                      <span class="inv-base-badge" *ngIf="item.base_model">{{ item.base_model }}</span>
                       <span class="inv-civitai-badge" *ngIf="item.from_civitai">CivitAI</span>
                       <span class="inv-override-badge" *ngIf="item.has_override" title="Tiene overrides personalizados">&#9881;</span>
                       <span class="inv-item-size">{{ formatBytes(item.size_bytes) }}</span>
@@ -1178,12 +1196,18 @@ export class AppComponent implements OnInit, OnDestroy {
   models: Model[] = [];
   samplers: string[] = [];
   generatedImages: string[] = [];
-  generatedVideos: string[] = [];  // Video IDs from KAS_SaveVideoCache
+  generatedVideos: string[] = [];  // Gallery IDs for generated videos
 
   // Video generation settings
   generationMode: 'image' | 'video' = 'image';
   videoLength = 81;  // Frames
   videoFps = 8.0;
+  videoModels: import('./types').VideoModel[] = [];
+  selectedVideoModel = '';
+  videoResolutionPreset = '832x480';
+  /** Coincide con un preset si width/height son exactamente 832x480, etc. */
+  imageResolutionPreset = '';
+  generationProgress = 0;
 
   configHost = '';
   configPort = '8188';
@@ -1265,6 +1289,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.loadSamplers();
     this.loadSettings();
     this.loadGallery();
+    this.loadVideoModels();
     this.healthInterval = setInterval(() => this.checkHealth(), 30000);
   }
 
@@ -1367,6 +1392,45 @@ export class AppComponent implements OnInit, OnDestroy {
     });
   }
 
+  loadVideoModels() {
+    this.generationService.getVideoModels().subscribe({
+      next: (data) => { this.videoModels = data.models || []; },
+      error: () => { this.videoModels = []; }
+    });
+  }
+
+  handleVideoResolutionPreset(preset: string) {
+    this.videoResolutionPreset = preset;
+    const [w, h] = preset.split('x').map(Number);
+    this.width = w;
+    this.height = h;
+  }
+
+  private static readonly IMAGE_RESOLUTION_PRESETS = ['832x480', '480x832', '640x640', '1280x720'] as const;
+
+  syncImageResolutionPresetFromSize() {
+    const key = `${this.width}x${this.height}`;
+    this.imageResolutionPreset = (AppComponent.IMAGE_RESOLUTION_PRESETS as readonly string[]).includes(key)
+      ? key
+      : '';
+  }
+
+  handleImageResolutionPreset(preset: string) {
+    this.imageResolutionPreset = preset;
+    const [w, h] = preset.split('x').map(Number);
+    this.width = w;
+    this.height = h;
+    this.handleSaveSetting('width', this.width);
+    this.handleSaveSetting('height', this.height);
+  }
+
+  setGenerationMode(mode: 'image' | 'video') {
+    this.generationMode = mode;
+    if (mode === 'image') {
+      this.syncImageResolutionPresetFromSize();
+    }
+  }
+
   loadSettings() {
     this.generationService.getSettings().subscribe({
       next: (s: Settings) => {
@@ -1378,6 +1442,7 @@ export class AppComponent implements OnInit, OnDestroy {
         if (s.height) this.height = Number(s.height) || 1024;
         if (s.negative_prompt) this.negativePrompt = s.negative_prompt;
         if (s.strength) this.strength = Number(s.strength) || 1.0;
+        this.syncImageResolutionPresetFromSize();
       },
       error: () => {}
     });
@@ -1640,6 +1705,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   handleGenerateImage() {
     this.generating = true;
+    this.generationProgress = 0;
     this.generatedImages = [];
     this.generatedVideos = [];
 
@@ -1680,32 +1746,39 @@ export class AppComponent implements OnInit, OnDestroy {
 
   pollJob(jobId: string) {
     let attempts = 0;
-    const maxAttempts = this.generationMode === 'video' ? 300 : 60;  // Videos take longer
+    const maxAttempts = this.generationMode === 'video' ? 600 : 60;
+    const pollInterval = this.generationMode === 'video' ? 3000 : 2000;
     const interval = setInterval(() => {
       attempts++;
       if (attempts > maxAttempts) {
         clearInterval(interval);
         this.generating = false;
+        this.generationProgress = 0;
         this.showToast('Tiempo de espera agotado', 'error');
         return;
       }
 
       this.generationService.getJobStatus(jobId).subscribe({
         next: (status) => {
+          if (status.progress && status.progress > 0) {
+            this.generationProgress = status.progress;
+          }
+
           if (status.status === 'completed') {
             clearInterval(interval);
             this.generating = false;
+            this.generationProgress = 0;
 
-            // Check if result is a video
-            if (status.is_video || (status.videos && status.videos.length > 0)) {
-              this.generatedVideos = status.video_ids || status.videos || [];
-              this.generatedImages = [];  // Clear images
+            if (status.is_video) {
+              this.generatedVideos = (status as any).gallery_video_ids || status.video_ids || [];
+              this.generatedImages = [];
               this.showToast('Video generado!', 'success');
+              this.loadGallery();
             } else if (status.images && status.images.length > 0) {
               this.generatedImages = status.images.map(img =>
                 img.startsWith('data:image') ? img : `data:image/png;base64,${img}`
               );
-              this.generatedVideos = [];  // Clear videos
+              this.generatedVideos = [];
               this.showToast('Imagen generada!', 'success');
               this.loadGallery();
             } else {
@@ -1714,12 +1787,13 @@ export class AppComponent implements OnInit, OnDestroy {
           } else if (status.status === 'error') {
             clearInterval(interval);
             this.generating = false;
+            this.generationProgress = 0;
             this.showToast('Error: ' + (status.error || 'Generaci\u00f3n fallida'), 'error');
           }
         },
         error: () => {}
       });
-    }, 2000);
+    }, pollInterval);
   }
 
   handleGenerateVideo() {
@@ -1729,25 +1803,33 @@ export class AppComponent implements OnInit, OnDestroy {
     }
 
     this.generating = true;
+    this.generationProgress = 0;
     this.generatedImages = [];
     this.generatedVideos = [];
+
+    const [w, h] = this.videoResolutionPreset.split('x').map(Number);
 
     const request: GenerationVideoRequest = {
       prompt: this.prompt,
       negative_prompt: this.negativePrompt,
-      width: this.width,
-      height: this.height,
+      width: w || 832,
+      height: h || 480,
       length: this.videoLength,
       fps: this.videoFps,
       steps: this.steps,
       cfg_scale: this.cfg,
       sampler: this.sampler,
-      checkpoint: this.selectedModel,
+      checkpoint: this.selectedVideoModel || undefined,
       seed: -1,
     };
 
     this.generationService.generateTxt2Video(request).subscribe({
       next: (response) => {
+        if (response.status === 'missing_loras' && response.missing_loras) {
+          this.generating = false;
+          this.handleMissingLoras(response.missing_loras);
+          return;
+        }
         this.showToast('Generaci\u00f3n de video iniciada', 'success');
         this.pollJob(response.job_id);
       },
@@ -1956,7 +2038,8 @@ export class AppComponent implements OnInit, OnDestroy {
     return cat.items.filter(i =>
       i.filename.toLowerCase().includes(q) ||
       (i.civitai_name && i.civitai_name.toLowerCase().includes(q)) ||
-      (i.base_model && i.base_model.toLowerCase().includes(q))
+      (i.base_model && i.base_model.toLowerCase().includes(q)) ||
+      (i.architecture_label && i.architecture_label.toLowerCase().includes(q))
     );
   }
 

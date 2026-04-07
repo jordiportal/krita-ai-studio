@@ -137,6 +137,18 @@ def init_db():
         conn.execute("ALTER TABLE gallery ADD COLUMN strength REAL NOT NULL DEFAULT 0")
     except sqlite3.OperationalError:
         pass
+    try:
+        conn.execute("ALTER TABLE gallery ADD COLUMN type TEXT NOT NULL DEFAULT 'image'")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE gallery ADD COLUMN length INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE gallery ADD COLUMN fps REAL NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
 
     setting_defaults = {
         "checkpoint": "novaAnimeXL_ilV125.safetensors",
@@ -299,6 +311,43 @@ def save_gallery_image(
         "width": width, "height": height, "filename": filename, "created_at": now,
         "seed": seed, "sampler": sampler, "scheduler": scheduler,
         "steps": steps, "cfg": cfg, "strength": strength,
+    }
+
+
+def save_gallery_video(
+    video_bytes: bytes, prompt: str, neg_prompt: str,
+    checkpoint: str, width: int, height: int,
+    seed: int = 0, sampler: str = "", scheduler: str = "",
+    steps: int = 0, cfg: float = 0.0, length: int = 0, fps: float = 0.0,
+) -> Dict[str, Any]:
+    vid_id = uuid.uuid4().hex[:12]
+    if len(video_bytes) >= 4 and video_bytes[:4] == b"RIFF":
+        ext = ".webp"
+    elif len(video_bytes) >= 3 and video_bytes[:3] == b"GIF":
+        ext = ".gif"
+    elif len(video_bytes) >= 4 and video_bytes[:4] == b"\x1aE\xdf\xa3":
+        ext = ".webm"
+    else:
+        ext = ".webp"
+    filename = f"{vid_id}{ext}"
+    filepath = GALLERY_DIR / filename
+    filepath.write_bytes(video_bytes)
+
+    now = time.time()
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute(
+        "INSERT INTO gallery (id, prompt, neg_prompt, checkpoint, width, height, filename, created_at, "
+        "seed, sampler, scheduler, steps, cfg, strength, type, length, fps) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'video', ?, ?)",
+        (vid_id, prompt, neg_prompt, checkpoint, width, height, filename, now,
+         seed, sampler, scheduler, steps, cfg, length, fps),
+    )
+    conn.commit()
+    conn.close()
+    return {
+        "id": vid_id, "prompt": prompt, "checkpoint": checkpoint,
+        "width": width, "height": height, "filename": filename,
+        "created_at": now, "type": "video", "length": length, "fps": fps,
     }
 
 
@@ -646,14 +695,21 @@ async def api_list_gallery(limit: int = 50, offset: int = 0):
 @app.get("/api/gallery/{img_id}/image")
 async def api_gallery_image(img_id: str):
     conn = sqlite3.connect(str(DB_PATH))
-    row = conn.execute("SELECT filename FROM gallery WHERE id = ?", (img_id,)).fetchone()
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT filename, type FROM gallery WHERE id = ?", (img_id,)).fetchone()
     conn.close()
     if not row:
         raise HTTPException(status_code=404, detail="Image not found")
-    filepath = GALLERY_DIR / row[0]
+    filepath = GALLERY_DIR / row["filename"]
     if not filepath.exists():
         raise HTTPException(status_code=404, detail="Image file missing")
-    return FileResponse(str(filepath), media_type="image/png")
+    if row["type"] == "video":
+        ext = filepath.suffix.lower()
+        media_map = {".webm": "video/webm", ".webp": "image/webp", ".gif": "image/gif", ".mp4": "video/mp4"}
+        media_type = media_map.get(ext, "application/octet-stream")
+    else:
+        media_type = "image/png"
+    return FileResponse(str(filepath), media_type=media_type)
 
 
 @app.delete("/api/gallery/{img_id}")
@@ -679,9 +735,11 @@ async def api_gallery_image_meta(img_id: str):
     data = dict(row)
     # Format to match CivitAI meta structure for frontend reuse
     # Use .get() with defaults for backward compatibility with old images
-    return {
+    item_type = data.get("type", "image")
+    result = {
         "id": data.get("id", ""),
         "url": f"/api/gallery/{img_id}/image",
+        "type": item_type,
         "prompt": data.get("prompt", ""),
         "neg_prompt": data.get("neg_prompt", ""),
         "checkpoint": data.get("checkpoint", ""),
@@ -707,6 +765,12 @@ async def api_gallery_image_meta(img_id: str):
             "strength": data.get("strength") if data.get("strength") else None,
         }
     }
+    if item_type == "video":
+        result["length"] = data.get("length", 0)
+        result["fps"] = data.get("fps", 0)
+        result["meta"]["length"] = data.get("length", 0)
+        result["meta"]["fps"] = data.get("fps", 0)
+    return result
 
 
 # ─── Health / Models / Samplers ───────────────────────────────────────────────
@@ -1175,6 +1239,34 @@ async def lora_download_status(download_id: str):
         return {"status": "error", "detail": str(e)}
 
 
+@app.get("/api/video-models")
+async def get_video_models():
+    """Lista modelos disponibles para generación de vídeo (capabilities: txt2video)."""
+    comfy_url = get_comfyui_url()
+    arch_mgr = get_arch_manager()
+    video_models = []
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{comfy_url}/api/kas/models?folder=diffusion_models")
+            if resp.status_code == 200:
+                models = resp.json().get("models", {}).get("diffusion_models", [])
+                for m in models:
+                    fname = m["filename"]
+                    arch_config = arch_mgr.resolve(fname)
+                    caps = arch_config.get("capabilities", [])
+                    if "txt2video" in caps:
+                        video_models.append({
+                            "name": fname,
+                            "filename": fname,
+                            "size_bytes": m.get("size_bytes", 0),
+                            "architecture": arch_config.get("_arch_id", ""),
+                            "architecture_label": arch_config.get("label", ""),
+                        })
+    except Exception as e:
+        print(f"[video-models] Error: {e}")
+    return {"models": video_models}
+
+
 @app.get("/api/samplers")
 async def get_samplers():
     samplers = [
@@ -1335,10 +1427,22 @@ async def get_job_status(job_id: str):
                         and isinstance(job[1], dict)
                     ):
                         if job[1].get("prompt_id") == job_id:
+                            progress = 50
+                            try:
+                                prog_resp = await client.get(f"{comfy_url}/api/kas/progress", timeout=3.0)
+                                if prog_resp.status_code == 200:
+                                    prog_data = prog_resp.json()
+                                    if prog_data.get("prompt_id") == job_id:
+                                        current = prog_data.get("current_step", 0)
+                                        total = prog_data.get("total_steps", 1)
+                                        if total > 0:
+                                            progress = max(5, min(95, int(current / total * 100)))
+                            except Exception:
+                                pass
                             return {
                                 "job_id": job_id,
                                 "status": "processing",
-                                "progress": 50,
+                                "progress": progress,
                             }
 
                 for job in queue_data.get("queue_pending", []):
@@ -1380,7 +1484,9 @@ async def get_job_status(job_id: str):
                     outputs = job_data.get("outputs", {})
                     images_base64: List[str] = []
                     images_raw: List[bytes] = []
-                    video_ids: List[str] = []
+                    video_files: List[Dict[str, str]] = []
+
+                    ANIMATED_EXTENSIONS = (".webp", ".gif", ".apng")
 
                     for node_id, node_output in outputs.items():
                         if not isinstance(node_output, dict):
@@ -1389,38 +1495,85 @@ async def get_job_status(job_id: str):
                         for img in images:
                             if not isinstance(img, dict):
                                 continue
+
+                            # Format A: KAS plugin (source=http, id=kas_xxx)
                             if img.get("source") == "http":
                                 img_id = img.get("id")
-                                if img_id:
-                                    # Verificar si es video (KAS_SaveVideoCache)
-                                    # Los videos de KAS tienen ids que empiezan con "kas_"
-                                    if img_id.startswith("kas_"):
-                                        video_ids.append(img_id)
-                                    else:
-                                        # Es una imagen normal (ETN_SaveImageCache)
-                                        img_resp = await client.get(
-                                            f"{comfy_url}/api/etn/image/{img_id}",
-                                            timeout=60.0,
-                                        )
-                                        if img_resp.status_code == 200:
-                                            images_raw.append(img_resp.content)
-                                            img_b64 = base64.b64encode(
-                                                img_resp.content
-                                            ).decode("utf-8")
-                                            images_base64.append(img_b64)
+                                if img_id and img_id.startswith("kas_"):
+                                    video_files.append({"type": "kas", "id": img_id})
+                                elif img_id:
+                                    img_resp = await client.get(
+                                        f"{comfy_url}/api/etn/image/{img_id}",
+                                        timeout=60.0,
+                                    )
+                                    if img_resp.status_code == 200:
+                                        images_raw.append(img_resp.content)
+                                        img_b64 = base64.b64encode(
+                                            img_resp.content
+                                        ).decode("utf-8")
+                                        images_base64.append(img_b64)
 
-                    # Manejar videos generados
-                    if video_ids:
+                            # Format B: ComfyUI native (type=output, filename=xxx.webp)
+                            elif img.get("type") == "output":
+                                fname = img.get("filename", "")
+                                if any(fname.lower().endswith(ext) for ext in ANIMATED_EXTENSIONS):
+                                    video_files.append({
+                                        "type": "comfyui",
+                                        "filename": fname,
+                                        "subfolder": img.get("subfolder", ""),
+                                    })
+
+                    # Manejar videos / animated outputs
+                    if video_files:
+                        gallery_video_ids = []
                         if job_id not in _saved_jobs:
                             _saved_jobs.add(job_id)
                             meta = _job_meta.pop(job_id, {})
-                            print(f"Video job completed: {video_ids}")
+                            for vf in video_files:
+                                try:
+                                    if vf["type"] == "kas":
+                                        vid_resp = await client.get(
+                                            f"{comfy_url}/api/kas/video/{vf['id']}",
+                                            timeout=120.0,
+                                        )
+                                    else:
+                                        params = {
+                                            "filename": vf["filename"],
+                                            "subfolder": vf.get("subfolder", ""),
+                                            "type": "output",
+                                        }
+                                        vid_resp = await client.get(
+                                            f"{comfy_url}/view",
+                                            params=params,
+                                            timeout=120.0,
+                                        )
+                                    if vid_resp.status_code == 200:
+                                        entry = save_gallery_video(
+                                            video_bytes=vid_resp.content,
+                                            prompt=meta.get("prompt", ""),
+                                            neg_prompt=meta.get("neg_prompt", ""),
+                                            checkpoint=meta.get("checkpoint", ""),
+                                            width=meta.get("width", 0),
+                                            height=meta.get("height", 0),
+                                            seed=meta.get("seed", 0),
+                                            sampler=meta.get("sampler", ""),
+                                            scheduler=meta.get("scheduler", ""),
+                                            steps=meta.get("steps", 0),
+                                            cfg=meta.get("cfg", 0.0),
+                                            length=meta.get("length", 0),
+                                            fps=meta.get("fps", 0.0),
+                                        )
+                                        gallery_video_ids.append(entry["id"])
+                                    else:
+                                        print(f"[video] Failed to download video: status={vid_resp.status_code}")
+                                except Exception as e:
+                                    print(f"[video] Failed to save video to gallery: {e}")
+                            print(f"Video job completed: saved {len(gallery_video_ids)} to gallery")
 
                         return {
                             "job_id": job_id,
                             "status": "completed",
-                            "videos": video_ids,
-                            "video_ids": video_ids,
+                            "gallery_video_ids": gallery_video_ids,
                             "progress": 100,
                             "is_video": True,
                         }
@@ -1507,7 +1660,7 @@ async def proxy_video(video_id: str):
 
 @app.post("/api/generate/txt2video", response_model=GenerationResponse)
 async def txt2video(request: GenerationVideoRequest):
-    """Genera video usando Wan 2.1 T2V via workflow."""
+    """Genera video usando Wan 2.x T2V via workflow con soporte LoRA."""
     comfy_url = get_comfyui_url()
     try:
         actual_seed = request.seed
@@ -1516,6 +1669,7 @@ async def txt2video(request: GenerationVideoRequest):
 
         VIDEO_UNET_DEFAULT = "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors"
         available_unets: list[str] = []
+        available_loras: list[str] = []
         try:
             async with httpx.AsyncClient(timeout=10.0) as c:
                 r = await c.get(f"{comfy_url}/api/kas/models?folder=diffusion_models")
@@ -1523,20 +1677,65 @@ async def txt2video(request: GenerationVideoRequest):
                     available_unets = [
                         m["filename"] for m in r.json().get("models", {}).get("diffusion_models", [])
                     ]
+                r2 = await c.get(f"{comfy_url}/api/kas/models?folder=loras")
+                if r2.status_code == 200:
+                    available_loras = [
+                        m["filename"] for m in r2.json().get("models", {}).get("loras", [])
+                    ]
         except Exception:
             pass
 
         req_checkpoint = request.checkpoint or ""
         video_checkpoint = req_checkpoint if req_checkpoint in available_unets else VIDEO_UNET_DEFAULT
 
+        # Parse LoRA tags from prompt
+        clean_prompt, lora_tags = parse_lora_tags(request.prompt)
+        resolved_loras = None
+        if lora_tags:
+            resolved_loras = []
+            missing_loras = []
+            for name, strength_model, strength_clip in lora_tags:
+                filename = resolve_lora_filename(name, available_loras)
+                if filename:
+                    resolved_loras.append((filename, strength_model, strength_clip))
+                    print(f"[txt2video] LoRA resuelto: {name} -> {filename}")
+                else:
+                    print(f"[txt2video] LoRA no encontrado: {name}")
+                    missing_loras.append((name, strength_model, strength_clip))
+
+            if missing_loras:
+                candidates_list = []
+                for lora_name, sm, sc in missing_loras:
+                    candidates = await _search_civitai_lora(lora_name)
+                    candidates_list.append(MissingLoraResult(
+                        lora_tag=lora_name,
+                        strength_model=sm,
+                        strength_clip=sc,
+                        candidates=candidates,
+                    ))
+                return GenerationResponse(
+                    job_id="",
+                    status="missing_loras",
+                    missing_loras=candidates_list,
+                )
+
+        prompt_text = clean_prompt if lora_tags else request.prompt
+
         arch_mgr = get_arch_manager()
         video_arch_config = arch_mgr.resolve(video_checkpoint)
 
+        low_unet: Optional[str] = None
+        if "high_noise" in video_checkpoint.lower():
+            cand = video_checkpoint.replace("high_noise", "low_noise")
+            if cand in available_unets:
+                low_unet = cand
+
         workflow = build_txt2video_workflow(
             arch_config=video_arch_config,
-            prompt=request.prompt,
+            prompt=prompt_text,
             negative_prompt=request.negative_prompt or "",
             model_name=video_checkpoint,
+            low_noise_model=low_unet,
             vae_override=request.vae or "",
             clip_override=request.clip or "",
             sampler=request.sampler or "",
@@ -1549,14 +1748,18 @@ async def txt2video(request: GenerationVideoRequest):
             length=request.length,
             fps=request.fps,
             batch_size=1,
+            loras=resolved_loras,
         )
-        print(f"[txt2video] arch={video_arch_config.get('_arch_id')}, unet={video_checkpoint}, seed={actual_seed}, length={request.length}")
+        print(
+            f"[txt2video] arch={video_arch_config.get('_arch_id')}, unet={video_checkpoint}, "
+            f"dual={low_unet is not None}, low={low_unet or '-'}, seed={actual_seed}, length={request.length}, loras={len(resolved_loras or [])}"
+        )
 
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{comfy_url}/prompt",
                 json={"prompt": workflow},
-                timeout=5.0,
+                timeout=15.0,
             )
             if response.status_code != 200:
                 print(f"[txt2video] ComfyUI rejected: {response.text[:500]}")

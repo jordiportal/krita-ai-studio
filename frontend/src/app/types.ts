@@ -132,6 +132,17 @@ export interface GalleryItem {
   height: number;
   filename: string;
   created_at: number;
+  type?: string;
+  length?: number;
+  fps?: number;
+}
+
+export interface VideoModel {
+  name: string;
+  filename: string;
+  size_bytes: number;
+  architecture: string;
+  architecture_label: string;
 }
 
 export interface GalleryResponse {
