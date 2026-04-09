@@ -8,8 +8,11 @@ export const authInterceptor: HttpInterceptorFn = (req, next) => {
   const token = authService.getToken();
 
   const clonedReq = token
-    ? req.clone({ setHeaders: { Authorization: `Bearer ${token}` } })
-    : req;
+    ? req.clone({
+        withCredentials: true,
+        setHeaders: { Authorization: `Bearer ${token}` },
+      })
+    : req.clone({ withCredentials: true });
 
   return next(clonedReq).pipe(
     catchError((error: HttpErrorResponse) => {

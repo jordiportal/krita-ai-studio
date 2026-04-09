@@ -6,6 +6,7 @@ import { AuthStatus, LoginResponse } from './types';
 @Injectable({ providedIn: 'root' })
 export class AuthService {
   private readonly TOKEN_KEY = 'krita_ai_token';
+  private readonly apiUrl = '/api';
   private logoutSubject = new Subject<void>();
   readonly sessionExpired$ = this.logoutSubject.asObservable();
 
@@ -21,9 +22,23 @@ export class AuthService {
     );
   }
 
-  logout(): void {
-    localStorage.removeItem(this.TOKEN_KEY);
-    this.logoutSubject.next();
+  logout(onDone?: () => void): void {
+    this.http.post<{ status: string }>(`${this.apiUrl}/auth/logout`, {}).subscribe({
+      next: () => {
+        localStorage.removeItem(this.TOKEN_KEY);
+        this.logoutSubject.next();
+        onDone?.();
+      },
+      error: () => {
+        localStorage.removeItem(this.TOKEN_KEY);
+        this.logoutSubject.next();
+        onDone?.();
+      },
+    });
+  }
+
+  loginWithMicrosoft(): void {
+    window.location.href = `${this.apiUrl}/auth/microsoft/start`;
   }
 
   getToken(): string | null {

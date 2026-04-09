@@ -22,6 +22,8 @@ import {
   ArchitecturesResponse,
   ModelOverrideResponse,
   ModelOverridesListResponse,
+  UsersListResponse,
+  AppUserRow,
 } from './types';
 
 @Injectable({
@@ -204,5 +206,19 @@ export class GenerationService {
 
   getVideoModels(): Observable<{ models: import('./types').VideoModel[] }> {
     return this.http.get<{ models: import('./types').VideoModel[] }>(`${this.apiUrl}/video-models`);
+  }
+
+  getUsers(): Observable<UsersListResponse> {
+    return this.http.get<UsersListResponse>(`${this.apiUrl}/users`);
+  }
+
+  patchUser(
+    userId: string,
+    body: { role?: string; disabled?: boolean },
+  ): Observable<{ user: AppUserRow }> {
+    return this.http.patch<{ user: AppUserRow }>(
+      `${this.apiUrl}/users/${encodeURIComponent(userId)}`,
+      body,
+    );
   }
 }

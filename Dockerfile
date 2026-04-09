@@ -43,6 +43,7 @@ COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
 # Copiar código backend
 COPY backend/main.py .
+COPY backend/oauth_microsoft.py .
 COPY backend/workflow_krita.py .
 COPY backend/civitai.py .
 COPY backend/architectures.py .

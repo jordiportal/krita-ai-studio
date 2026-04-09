@@ -181,12 +181,31 @@ export interface GalleryResponse {
 export interface AuthStatus {
   auth_enabled: boolean;
   logged_in: boolean;
-  username?: string;
+  username?: string | null;
+  email?: string | null;
+  user_id?: string | null;
+  role?: string | null;
+  is_admin?: boolean;
+  oauth_available?: boolean;
+  legacy_login?: boolean;
 }
 
 export interface LoginResponse {
   token: string;
   username: string;
+}
+
+export interface AppUserRow {
+  id: string;
+  email: string;
+  display_name: string;
+  role: string;
+  disabled: number;
+  last_login: number;
+}
+
+export interface UsersListResponse {
+  users: AppUserRow[];
 }
 
 export interface CachedModel {

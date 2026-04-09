@@ -16,6 +16,15 @@ services:
       DATA_DIR: /app/data
       # Misma variable que moderación CivitAI: 0 = filtro LLM opcional en UI; 1/2 = filtro LLM obligatorio antes de ComfyUI
       CONTENT_FILTER: ${CONTENT_FILTER:-1}
+      # OAuth Microsoft (Entra ID, single-tenant) — opcional; ver .env.example
+      MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
+      MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
+      MICROSOFT_TENANT_ID: ${MICROSOFT_TENANT_ID:-}
+      OAUTH_REDIRECT_URI: ${OAUTH_REDIRECT_URI:-}
+      OAUTH_ADMIN_EMAILS: ${OAUTH_ADMIN_EMAILS:-}
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:3333}
+      ALLOW_LEGACY_LOGIN: ${ALLOW_LEGACY_LOGIN:-true}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
     
     ports:
       - "${KRITA_HTTP_PORT:-3333}:3000"

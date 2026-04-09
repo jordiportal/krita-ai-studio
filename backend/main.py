@@ -11,6 +11,7 @@ import base64
 import hashlib
 import random
 import secrets
+import urllib.parse
 import sqlite3
 import time
 import uuid
@@ -22,7 +23,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 import httpx
@@ -36,8 +37,20 @@ from workflow_krita import (
 )
 from architectures import get_arch_manager
 from civitai import router as civitai_router, configure as configure_civitai, get_content_filter_info
+from oauth_microsoft import (
+    oauth_env_configured,
+    build_authorize_url,
+    exchange_code_for_tokens,
+    validate_microsoft_id_token,
+    get_app_public_url,
+    allow_legacy_login,
+    cookie_secure,
+    get_oauth_admin_emails,
+)
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
+JWT_COOKIE_NAME = "kas_token"
+MS_OAUTH_STATE_COOKIE = "ms_oauth_state"
 DB_PATH = DATA_DIR / "krita_ai.db"
 GALLERY_DIR = DATA_DIR / "gallery"
 MODELS_DIR = DATA_DIR / "models"
@@ -121,6 +134,22 @@ def init_db():
             PRIMARY KEY (folder, filename)
         )
     """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id              TEXT PRIMARY KEY,
+            microsoft_oid   TEXT UNIQUE NOT NULL,
+            email           TEXT NOT NULL DEFAULT '',
+            display_name    TEXT NOT NULL DEFAULT '',
+            role            TEXT NOT NULL DEFAULT 'user',
+            disabled        INTEGER NOT NULL DEFAULT 0,
+            created_at      REAL NOT NULL,
+            last_login      REAL NOT NULL DEFAULT 0
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_users_email ON users (email)"
+    )
 
     # Migration: add missing columns to existing gallery table
     try:
@@ -318,12 +347,29 @@ def get_jwt_secret() -> str:
     return secret
 
 
-def create_token(username: str) -> str:
+def create_app_jwt_legacy(username: str) -> str:
     secret = get_jwt_secret()
+    now = datetime.utcnow()
     payload = {
         "sub": username,
-        "exp": datetime.utcnow() + timedelta(days=30),
-        "iat": datetime.utcnow(),
+        "role": "admin",
+        "typ": "legacy",
+        "exp": now + timedelta(days=30),
+        "iat": now,
+    }
+    return jwt.encode(payload, secret, algorithm="HS256")
+
+
+def create_app_jwt_oauth(user_id: str, email: str, role: str) -> str:
+    secret = get_jwt_secret()
+    now = datetime.utcnow()
+    payload = {
+        "sub": user_id,
+        "email": email,
+        "role": role,
+        "typ": "oauth",
+        "exp": now + timedelta(days=30),
+        "iat": now,
     }
     return jwt.encode(payload, secret, algorithm="HS256")
 
@@ -334,6 +380,166 @@ def verify_token(token: str) -> dict | None:
         return jwt.decode(token, secret, algorithms=["HS256"])
     except jwt.InvalidTokenError:
         return None
+
+
+def app_auth_enabled(cfg: Optional[Dict[str, str]] = None) -> bool:
+    if cfg is None:
+        cfg = get_comfyui_config()
+    if oauth_env_configured():
+        return True
+    return bool(cfg.get("auth_user") and cfg.get("auth_pass"))
+
+
+def _count_active_admins() -> int:
+    conn = sqlite3.connect(str(DB_PATH))
+    n = conn.execute(
+        "SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0"
+    ).fetchone()[0]
+    conn.close()
+    return int(n)
+
+
+def user_is_disabled(user_id: str) -> bool:
+    conn = sqlite3.connect(str(DB_PATH))
+    row = conn.execute("SELECT disabled FROM users WHERE id = ?", (user_id,)).fetchone()
+    conn.close()
+    if not row:
+        return True
+    return bool(row[0])
+
+
+def user_upsert_oauth(microsoft_oid: str, email: str, display_name: str) -> tuple[str, str]:
+    admin_emails = get_oauth_admin_emails()
+    email_l = (email or "").strip().lower()
+    conn = sqlite3.connect(str(DB_PATH))
+    row = conn.execute(
+        "SELECT id, role FROM users WHERE microsoft_oid = ?", (microsoft_oid,)
+    ).fetchone()
+    now = time.time()
+    if row:
+        uid, role = row[0], row[1]
+        conn.execute(
+            "UPDATE users SET email = ?, display_name = ?, last_login = ? WHERE id = ?",
+            (email or "", display_name or "", now, uid),
+        )
+        conn.commit()
+        conn.close()
+        return uid, role
+    admins = _count_active_admins()
+    if admins == 0:
+        role = "admin"
+    elif email_l and email_l in admin_emails:
+        role = "admin"
+    else:
+        role = "user"
+    uid = uuid.uuid4().hex
+    conn.execute(
+        "INSERT INTO users (id, microsoft_oid, email, display_name, role, disabled, "
+        "created_at, last_login) VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+        (uid, microsoft_oid, email or "", display_name or "", role, now, now),
+    )
+    conn.commit()
+    conn.close()
+    return uid, role
+
+
+def list_users_db() -> List[Dict[str, Any]]:
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT id, email, display_name, role, disabled, last_login FROM users ORDER BY email"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_user_db(
+    user_id: str, role: Optional[str] = None, disabled: Optional[bool] = None
+) -> Optional[Dict[str, Any]]:
+    conn = sqlite3.connect(str(DB_PATH))
+    row = conn.execute("SELECT id FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not row:
+        conn.close()
+        return None
+    if role is not None:
+        if role not in ("admin", "user"):
+            conn.close()
+            raise ValueError("Invalid role")
+        conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+    if disabled is not None:
+        conn.execute(
+            "UPDATE users SET disabled = ? WHERE id = ?", (1 if disabled else 0, user_id)
+        )
+    conn.commit()
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT id, email, display_name, role, disabled, last_login FROM users WHERE id = ?",
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def token_payload_allowed(payload: Dict[str, Any], cfg: Dict[str, str]) -> bool:
+    if not payload:
+        return False
+    typ = payload.get("typ")
+    if typ == "oauth":
+        uid = payload.get("sub")
+        if not uid or not isinstance(uid, str):
+            return False
+        return not user_is_disabled(uid)
+    if typ == "legacy":
+        return bool(
+            cfg.get("auth_user")
+            and secrets.compare_digest(str(payload.get("sub", "")), str(cfg.get("auth_user", "")))
+        )
+    u = cfg.get("auth_user", "")
+    p = cfg.get("auth_pass", "")
+    if u and p and payload.get("sub") == u:
+        return True
+    return False
+
+
+def is_admin_payload(payload: Dict[str, Any], cfg: Dict[str, str]) -> bool:
+    if not payload:
+        return False
+    typ = payload.get("typ")
+    if typ == "oauth":
+        return str(payload.get("role", "")).lower() == "admin"
+    if typ == "legacy":
+        return True
+    u = cfg.get("auth_user", "")
+    return bool(u and payload.get("sub") == u)
+
+
+def attach_auth_cookie(response: JSONResponse | RedirectResponse, token: str) -> None:
+    response.set_cookie(
+        key=JWT_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        max_age=30 * 24 * 3600,
+        samesite="lax",
+        secure=cookie_secure(),
+        path="/",
+    )
+
+
+def clear_auth_cookie(response: JSONResponse | RedirectResponse) -> None:
+    response.delete_cookie(JWT_COOKIE_NAME, path="/")
+
+
+def extract_token_from_request(request: Request) -> Optional[str]:
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        t = auth_header[7:].strip()
+        if t:
+            return t
+    q = request.query_params.get("token")
+    if q:
+        return q
+    c = request.cookies.get(JWT_COOKIE_NAME)
+    return c if c else None
 
 
 def save_gallery_image(
@@ -443,7 +649,14 @@ _job_meta: Dict[str, Dict[str, Any]] = {}
 
 # ─── JWT Auth Middleware ──────────────────────────────────────────────────────
 
-_PUBLIC_API = {"/api/auth/status", "/api/auth/login", "/api/health"}
+_PUBLIC_API = {
+    "/api/auth/status",
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/health",
+    "/api/auth/microsoft/start",
+    "/api/auth/microsoft/callback",
+}
 
 # Mismo valor que el frontend al mostrar claves guardadas (no re-enviar al guardar)
 _CONFIG_SECRET_PLACEHOLDER = "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"
@@ -460,17 +673,12 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         cfg = get_comfyui_config()
-        if not (cfg.get("auth_user") and cfg.get("auth_pass")):
+        if not app_auth_enabled(cfg):
             return await call_next(request)
 
-        token = None
-        auth_header = request.headers.get("authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
-        if not token:
-            token = request.query_params.get("token")
-
-        if token and verify_token(token):
+        token = extract_token_from_request(request)
+        payload = verify_token(token) if token else None
+        if payload and token_payload_allowed(payload, cfg):
             return await call_next(request)
 
         return JSONResponse(
@@ -580,6 +788,11 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class UserPatchPayload(BaseModel):
+    role: Optional[str] = None
+    disabled: Optional[bool] = None
+
+
 # ─── App ──────────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -588,9 +801,15 @@ async def lifespan(app: FastAPI):
     configure_civitai(DB_PATH, MODELS_DIR)
     url = get_comfyui_url()
     user, pw = get_auth_credentials()
+    if oauth_env_configured():
+        auth_msg = "OAuth Microsoft + JWT"
+    elif user and pw:
+        auth_msg = "JWT (login local)"
+    else:
+        auth_msg = "disabled (open)"
     print(f"Krita AI Studio Backend v3.1 iniciado")
     print(f"ComfyUI URL: {url}")
-    print(f"Auth: {'JWT enabled' if user and pw else 'disabled (open)'}")
+    print(f"Auth app: {auth_msg}")
     print(f"Database: {DB_PATH}")
     print(f"Gallery: {GALLERY_DIR}")
     print(f"Models cache: {MODELS_DIR}")
@@ -622,27 +841,46 @@ app.include_router(civitai_router)
 @app.get("/api/auth/status")
 async def auth_status(request: Request):
     cfg = get_comfyui_config()
-    auth_enabled = bool(cfg.get("auth_user") and cfg.get("auth_pass"))
+    enabled = app_auth_enabled(cfg)
+    legacy_creds = bool(cfg.get("auth_user") and cfg.get("auth_pass"))
+    oauth_on = oauth_env_configured()
+    legacy_allowed = allow_legacy_login() or not oauth_on
 
-    logged_in = False
-    if not auth_enabled:
-        logged_in = True
-    else:
-        auth_header = request.headers.get("authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
-            if verify_token(token):
-                logged_in = True
+    token = extract_token_from_request(request)
+    payload = verify_token(token) if token else None
+    valid = bool(payload and token_payload_allowed(payload, cfg))
+    logged_in = (not enabled) or valid
 
-    return {
-        "auth_enabled": auth_enabled,
+    out: Dict[str, Any] = {
+        "auth_enabled": enabled,
         "logged_in": logged_in,
-        "username": cfg.get("auth_user", "") if logged_in and auth_enabled else None,
+        "oauth_available": oauth_on,
+        "legacy_login": legacy_creds and legacy_allowed,
+        "username": None,
+        "email": None,
+        "user_id": None,
+        "role": None,
+        "is_admin": False,
     }
+    if valid and payload:
+        if payload.get("typ") == "oauth":
+            out["username"] = payload.get("email") or payload.get("sub")
+            out["email"] = payload.get("email")
+            out["user_id"] = payload.get("sub")
+            out["role"] = payload.get("role")
+        else:
+            out["username"] = payload.get("sub")
+            out["role"] = payload.get("role") or "admin"
+        out["is_admin"] = is_admin_payload(payload, cfg)
+
+    return out
 
 
 @app.post("/api/auth/login")
 async def auth_login(payload: LoginRequest):
+    if oauth_env_configured() and not allow_legacy_login():
+        raise HTTPException(status_code=403, detail="Local login disabled")
+
     cfg = get_comfyui_config()
     stored_user = cfg.get("auth_user", "")
     stored_hash = cfg.get("auth_pass", "")
@@ -656,8 +894,129 @@ async def auth_login(payload: LoginRequest):
     if not verify_password(payload.password, stored_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    token = create_token(payload.username)
-    return {"token": token, "username": stored_user}
+    token = create_app_jwt_legacy(stored_user)
+    r = JSONResponse(content={"token": token, "username": stored_user})
+    attach_auth_cookie(r, token)
+    return r
+
+
+@app.post("/api/auth/logout")
+async def auth_logout():
+    r = JSONResponse(content={"status": "ok"})
+    clear_auth_cookie(r)
+    r.delete_cookie(MS_OAUTH_STATE_COOKIE, path="/")
+    return r
+
+
+@app.get("/api/auth/microsoft/start")
+async def oauth_microsoft_start():
+    if not oauth_env_configured():
+        raise HTTPException(status_code=404, detail="OAuth not configured")
+    state = secrets.token_urlsafe(32)
+    resp = RedirectResponse(url=build_authorize_url(state), status_code=302)
+    resp.set_cookie(
+        MS_OAUTH_STATE_COOKIE,
+        state,
+        max_age=600,
+        httponly=True,
+        samesite="lax",
+        secure=cookie_secure(),
+        path="/",
+    )
+    return resp
+
+
+@app.get("/api/auth/microsoft/callback")
+async def oauth_microsoft_callback(request: Request):
+    base = get_app_public_url()
+    err = request.query_params.get("error")
+    if err:
+        return RedirectResponse(
+            url=f"{base}/?login_error={urllib.parse.quote(err)}",
+            status_code=302,
+        )
+    if not oauth_env_configured():
+        return RedirectResponse(url=f"{base}/?login_error=config", status_code=302)
+
+    state = request.query_params.get("state") or ""
+    code = request.query_params.get("code") or ""
+    cookie_state = request.cookies.get(MS_OAUTH_STATE_COOKIE) or ""
+
+    if not state or not cookie_state or not secrets.compare_digest(state, cookie_state):
+        return RedirectResponse(url=f"{base}/?login_error=state", status_code=302)
+    if not code:
+        return RedirectResponse(url=f"{base}/?login_error=code", status_code=302)
+
+    try:
+        tokens = await exchange_code_for_tokens(code)
+        id_tok = tokens.get("id_token")
+        if not id_tok:
+            return RedirectResponse(url=f"{base}/?login_error=no_id_token", status_code=302)
+        claims = validate_microsoft_id_token(id_tok)
+        oid = claims.get("oid") or claims.get("sub") or ""
+        if not oid:
+            return RedirectResponse(url=f"{base}/?login_error=no_oid", status_code=302)
+        email = str(claims.get("email") or claims.get("preferred_username") or "")
+        name = str(claims.get("name") or "")
+        uid, role = user_upsert_oauth(str(oid), email, name)
+        if user_is_disabled(uid):
+            return RedirectResponse(url=f"{base}/?login_error=disabled", status_code=302)
+        token = create_app_jwt_oauth(uid, email, role)
+        resp = RedirectResponse(url=f"{base}/", status_code=302)
+        resp.delete_cookie(MS_OAUTH_STATE_COOKIE, path="/")
+        attach_auth_cookie(resp, token)
+        return resp
+    except Exception as e:
+        msg = urllib.parse.quote(str(e)[:220])
+        return RedirectResponse(url=f"{base}/?login_error={msg}", status_code=302)
+
+
+def _require_admin(request: Request) -> Dict[str, Any]:
+    cfg = get_comfyui_config()
+    if not app_auth_enabled(cfg):
+        raise HTTPException(status_code=403, detail="Authentication is not enabled")
+    token = extract_token_from_request(request)
+    payload = verify_token(token) if token else None
+    if not payload or not token_payload_allowed(payload, cfg):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if not is_admin_payload(payload, cfg):
+        raise HTTPException(status_code=403, detail="Admin required")
+    return payload
+
+
+@app.get("/api/users")
+async def api_list_users(request: Request):
+    _require_admin(request)
+    return {"users": list_users_db()}
+
+
+@app.patch("/api/users/{user_id}")
+async def api_patch_user(request: Request, user_id: str, body: UserPatchPayload):
+    admin_payload = _require_admin(request)
+    data = body.model_dump(exclude_none=True)
+    if not data:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    if data.get("disabled") or data.get("role") == "user":
+        if admin_payload.get("typ") == "oauth" and user_id == admin_payload.get("sub"):
+            if _count_active_admins() <= 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot demote or disable the last admin",
+                )
+
+    try:
+        updated = update_user_db(
+            user_id,
+            role=data.get("role"),
+            disabled=data.get("disabled"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    if not updated:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"user": updated}
 
 
 # ─── Config endpoints (ComfyUI connection + auth) ────────────────────────────
@@ -666,7 +1025,7 @@ async def auth_login(payload: LoginRequest):
 async def api_get_config():
     cfg = get_comfyui_config()
     url = get_comfyui_url()
-    auth_enabled = bool(cfg.get("auth_user") and cfg.get("auth_pass"))
+    auth_enabled = app_auth_enabled(cfg)
     safe_cfg = {**cfg, "comfyui_url": url, "auth_enabled": auth_enabled}
     if safe_cfg.get("auth_pass"):
         safe_cfg["auth_pass"] = _CONFIG_SECRET_PLACEHOLDER
@@ -687,7 +1046,7 @@ async def api_content_filter():
 @app.post("/api/config")
 async def api_save_config(payload: ConfigPayload):
     old_cfg = get_comfyui_config()
-    was_auth_enabled = bool(old_cfg.get("auth_user") and old_cfg.get("auth_pass"))
+    was_auth_enabled = app_auth_enabled(old_cfg)
 
     data: Dict[str, str] = {}
     for field, val in payload.model_dump(exclude_none=True).items():
@@ -713,7 +1072,7 @@ async def api_save_config(payload: ConfigPayload):
         update_comfyui_config(data)
 
     cfg = get_comfyui_config()
-    is_auth_enabled = bool(cfg.get("auth_user") and cfg.get("auth_pass"))
+    is_auth_enabled = app_auth_enabled(cfg)
     auth_activated = is_auth_enabled and not was_auth_enabled
 
     url = get_comfyui_url()
@@ -729,11 +1088,16 @@ async def api_save_config(payload: ConfigPayload):
     response.pop("jwt_secret", None)
 
     if auth_activated:
-        response["token"] = create_token(cfg.get("auth_user", ""))
+        tok = create_app_jwt_legacy(cfg.get("auth_user", ""))
+        response["token"] = tok
         response["auth_activated"] = True
 
     response["llm_filter"] = get_llm_filter_info(cfg)
 
+    if auth_activated and response.get("token"):
+        jr = JSONResponse(content=response)
+        attach_auth_cookie(jr, response["token"])
+        return jr
     return response
 
 

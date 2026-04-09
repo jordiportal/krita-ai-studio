@@ -7,8 +7,8 @@ import { AuthService } from './auth.service';
 import {
   Model, GenerationRequest, GenerationVideoRequest, Settings, ComfyConfig,
   ConnectionTestResult, LlmTestResult, GalleryItem, CachedModel, ModelTypeOption,
-  InventoryCategory, InventoryItem, Architecture, VideoModel, ModelFavoriteEntry,
-  MissingLoraResult, MissingLoraCandidate,
+  InventoryCategory, InventoryItem, Architecture, VideoModel, ModelFavoriteEntry, AppUserRow,
+  MissingLoraResult, MissingLoraCandidate, AuthStatus,
 } from './types';
 
 @Component({
@@ -34,7 +34,17 @@ import {
           <h1 class="login-title">Krita AI</h1>
           <p class="login-subtitle">Studio</p>
         </div>
-        <form (ngSubmit)="handleLogin()">
+        <button type="button" class="btn btn-secondary login-ms-btn" *ngIf="oauthAvailable"
+                (click)="handleLoginMicrosoft()">
+          Continuar con Microsoft
+        </button>
+        <p class="login-oauth-hint" *ngIf="oauthAvailable && !legacyLogin">
+          Inicia sesi&oacute;n con tu cuenta de la organizaci&oacute;n.
+        </p>
+        <div class="login-divider" *ngIf="oauthAvailable && legacyLogin">
+          <span>o credenciales locales</span>
+        </div>
+        <form *ngIf="legacyLogin" (ngSubmit)="handleLogin()">
           <div class="input-group">
             <label>Usuario</label>
             <input class="input-field" type="text" [(ngModel)]="loginUsername"
@@ -637,6 +647,42 @@ import {
             {{ connectionTestResult.message }}
           </div>
         </div>
+
+        <div class="card" *ngIf="isAdmin">
+          <h2 class="card-title">Usuarios (Microsoft OAuth)</h2>
+          <p class="auth-hint">
+            Las credenciales <strong>Usuario / Contrase&ntilde;a</strong> de arriba son el acceso <strong>local</strong> a la app.
+            Aqu&iacute; gestionas las cuentas que entran con <strong>Continuar con Microsoft</strong> (rol y desactivar).
+          </p>
+          <div *ngIf="adminUsersLoading" class="gallery-loading"><span class="spinner"></span></div>
+          <div class="admin-users-card" *ngIf="!adminUsersLoading">
+            <div class="admin-user-row" *ngFor="let u of adminUsers">
+              <div class="admin-user-main">
+                <span class="admin-user-email">{{ u.email || u.id }}</span>
+                <span class="admin-user-name" *ngIf="u.display_name">{{ u.display_name }}</span>
+                <span class="admin-user-meta">&Uacute;ltimo acceso: {{ formatUserTime(u.last_login) }}</span>
+              </div>
+              <select class="input-field admin-user-role"
+                      [ngModel]="u.role"
+                      (ngModelChange)="handleAdminUserRoleChange(u, $event)">
+                <option value="user">Usuario</option>
+                <option value="admin">Admin</option>
+              </select>
+              <label class="admin-user-dsl">
+                <input type="checkbox" [checked]="u.disabled === 1"
+                       (change)="handleAdminUserDisabledChange(u, $any($event.target).checked)" />
+                Desactivado
+              </label>
+            </div>
+            <div *ngIf="adminUsers.length === 0" class="empty-gallery">
+              <p>A&uacute;n no hay usuarios con Microsoft; aparecer&aacute;n al iniciar sesi&oacute;n.</p>
+            </div>
+          </div>
+          <button type="button" class="btn btn-secondary" style="width:100%;margin-top:8px;"
+                  (click)="loadAdminUsers()">
+            Actualizar lista
+          </button>
+        </div>
       </ng-container>
 
       <!-- ============ MODELS TAB ============ -->
@@ -646,6 +692,10 @@ import {
           <button class="sub-tab" [class.active]="modelsView === 'images'" (click)="modelsView = 'images'; handleBrowseImages()">Im&aacute;genes</button>
           <button class="sub-tab" [class.active]="modelsView === 'inventory'" (click)="modelsView = 'inventory'; loadInventory()">
             Inventario
+          </button>
+          <button class="sub-tab" *ngIf="isAdmin" [class.active]="modelsView === 'users'"
+                  (click)="modelsView = 'users'; loadAdminUsers()">
+            Usuarios
           </button>
         </div>
 
@@ -844,6 +894,36 @@ import {
             <div class="empty-icon">&#128230;</div>
             <p>No se pudo cargar el inventario</p>
             <p class="empty-sub">Verifica la conexi&oacute;n con ComfyUI</p>
+          </div>
+        </ng-container>
+
+        <ng-container *ngIf="modelsView === 'users'">
+          <div *ngIf="adminUsersLoading" class="gallery-loading"><span class="spinner"></span></div>
+          <div class="admin-users-card" *ngIf="!adminUsersLoading">
+            <p class="auth-hint">
+              Cuentas que han iniciado sesi&oacute;n con Microsoft. Los administradores pueden cambiar rol o desactivar acceso.
+            </p>
+            <div class="admin-user-row" *ngFor="let u of adminUsers">
+              <div class="admin-user-main">
+                <span class="admin-user-email">{{ u.email || u.id }}</span>
+                <span class="admin-user-name" *ngIf="u.display_name">{{ u.display_name }}</span>
+                <span class="admin-user-meta">&Uacute;ltimo acceso: {{ formatUserTime(u.last_login) }}</span>
+              </div>
+              <select class="input-field admin-user-role"
+                      [ngModel]="u.role"
+                      (ngModelChange)="handleAdminUserRoleChange(u, $event)">
+                <option value="user">Usuario</option>
+                <option value="admin">Admin</option>
+              </select>
+              <label class="admin-user-dsl">
+                <input type="checkbox" [checked]="u.disabled === 1"
+                       (change)="handleAdminUserDisabledChange(u, $any($event.target).checked)" />
+                Desactivado
+              </label>
+            </div>
+            <div *ngIf="adminUsers.length === 0" class="empty-gallery">
+              <p>No hay usuarios registrados</p>
+            </div>
           </div>
         </ng-container>
 
@@ -1275,6 +1355,21 @@ import {
     .last-result-img:active { transform: scale(0.98); }
     .auth-hint { font-size: 13px; color: var(--text-secondary); margin-bottom: 12px; line-height: 1.4; }
     .opt-advanced-pick { font-weight: 600; color: var(--accent, #6366f1); }
+    .login-ms-btn { width: 100%; margin-bottom: 8px; }
+    .login-oauth-hint { font-size: 12px; color: var(--text-secondary); text-align: center; margin-bottom: 8px; line-height: 1.4; }
+    .login-divider { display: flex; align-items: center; gap: 12px; margin: 16px 0; color: var(--text-secondary); font-size: 12px; }
+    .login-divider::before, .login-divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+    .admin-users-card { padding: 4px 0 16px; }
+    .admin-user-row {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+      padding: 12px 0; border-bottom: 1px solid var(--border);
+    }
+    .admin-user-main { flex: 1; min-width: 180px; display: flex; flex-direction: column; gap: 4px; }
+    .admin-user-email { font-weight: 600; font-size: 13px; }
+    .admin-user-name { font-size: 12px; color: var(--text-secondary); }
+    .admin-user-meta { font-size: 11px; color: var(--text-secondary); }
+    .admin-user-role { width: 110px; padding: 6px 8px; font-size: 12px; }
+    .admin-user-dsl { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); cursor: pointer; }
   `]
 })
 export class AppComponent implements OnInit, OnDestroy {
@@ -1287,8 +1382,14 @@ export class AppComponent implements OnInit, OnDestroy {
   loginError = '';
   loggingIn = false;
   isAuthEnabled = false;
+  oauthAvailable = false;
+  legacyLogin = false;
+  isAdmin = false;
 
-  modelsView: 'search' | 'images' | 'cache' | 'inventory' = 'search';
+  adminUsers: AppUserRow[] = [];
+  adminUsersLoading = false;
+
+  modelsView: 'search' | 'images' | 'cache' | 'inventory' | 'users' = 'search';
   civitaiQuery = '';
   civitaiType = '';
   civitaiSort = 'Most Downloaded';
@@ -1448,8 +1549,8 @@ export class AppComponent implements OnInit, OnDestroy {
 
   ngOnInit() {
     this.sessionSub = this.authService.sessionExpired$.subscribe(() => {
-      this.appState = 'login';
       this.loginError = 'Sesi\u00f3n expirada';
+      this.checkAuthAndInit();
     });
     this.checkAuthAndInit();
   }
@@ -1461,12 +1562,25 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   checkAuthAndInit() {
+    const params = new URLSearchParams(window.location.search);
+    const le = params.get('login_error');
+    if (le) {
+      this.loginError = this.mapLoginError(le);
+      const u = new URL(window.location.href);
+      u.searchParams.delete('login_error');
+      const qs = u.searchParams.toString();
+      window.history.replaceState({}, '', u.pathname + (qs ? `?${qs}` : '') + u.hash);
+    }
+
     this.authService.checkStatus().subscribe({
       next: (status) => {
-        this.isAuthEnabled = status.auth_enabled;
+        this.applyAuthStatus(status);
         if (status.logged_in) {
           this.appState = 'app';
           this.initApp();
+          if (this.isAdmin) {
+            this.loadAdminUsers();
+          }
         } else {
           this.appState = 'login';
         }
@@ -1475,6 +1589,82 @@ export class AppComponent implements OnInit, OnDestroy {
         this.appState = 'app';
         this.initApp();
       }
+    });
+  }
+
+  private applyAuthStatus(status: AuthStatus) {
+    this.isAuthEnabled = status.auth_enabled;
+    this.oauthAvailable = !!status.oauth_available;
+    this.legacyLogin = !!status.legacy_login;
+    this.isAdmin = !!status.is_admin;
+  }
+
+  mapLoginError(code: string): string {
+    const map: Record<string, string> = {
+      state: 'Sesión de inicio inválida. Prueba de nuevo.',
+      code: 'Falta el código de autorización.',
+      disabled: 'Tu cuenta está desactivada.',
+      config: 'OAuth no está configurado en el servidor.',
+      no_id_token: 'Microsoft no devolvió identidad.',
+      no_oid: 'No se pudo identificar tu cuenta.',
+    };
+    if (map[code]) return map[code];
+    try {
+      return decodeURIComponent(code.replace(/\+/g, ' '));
+    } catch {
+      return code;
+    }
+  }
+
+  handleLoginMicrosoft() {
+    this.authService.loginWithMicrosoft();
+  }
+
+  formatUserTime(ts: number): string {
+    if (!ts) return '—';
+    return new Date(ts * 1000).toLocaleString();
+  }
+
+  loadAdminUsers() {
+    this.adminUsersLoading = true;
+    this.generationService.getUsers().subscribe({
+      next: (res) => {
+        this.adminUsers = res.users || [];
+        this.adminUsersLoading = false;
+      },
+      error: () => {
+        this.adminUsersLoading = false;
+        this.showToast('No se pudo cargar la lista de usuarios', 'error');
+      },
+    });
+  }
+
+  handleAdminUserRoleChange(u: AppUserRow, role: string) {
+    if (role === u.role) return;
+    this.generationService.patchUser(u.id, { role }).subscribe({
+      next: (res) => {
+        Object.assign(u, res.user);
+        this.showToast('Usuario actualizado', 'success');
+      },
+      error: (err) => {
+        this.showToast(err.error?.detail || 'Error al actualizar', 'error');
+        this.loadAdminUsers();
+      },
+    });
+  }
+
+  handleAdminUserDisabledChange(u: AppUserRow, checked: boolean) {
+    const disabled = !!checked;
+    if ((u.disabled === 1) === disabled) return;
+    this.generationService.patchUser(u.id, { disabled }).subscribe({
+      next: (res) => {
+        Object.assign(u, res.user);
+        this.showToast('Usuario actualizado', 'success');
+      },
+      error: (err) => {
+        this.showToast(err.error?.detail || 'Error al actualizar', 'error');
+        this.loadAdminUsers();
+      },
     });
   }
 
@@ -1500,8 +1690,20 @@ export class AppComponent implements OnInit, OnDestroy {
         this.loggingIn = false;
         this.loginUsername = '';
         this.loginPassword = '';
-        this.appState = 'app';
-        this.initApp();
+        this.authService.checkStatus().subscribe({
+          next: (status) => {
+            this.applyAuthStatus(status);
+            this.appState = 'app';
+            this.initApp();
+            if (this.isAdmin) {
+              this.loadAdminUsers();
+            }
+          },
+          error: () => {
+            this.appState = 'app';
+            this.initApp();
+          },
+        });
       },
       error: (err) => {
         this.loggingIn = false;
@@ -1513,9 +1715,8 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   handleLogout() {
-    this.authService.logout();
-    this.appState = 'login';
     this.loginError = '';
+    this.authService.logout(() => this.checkAuthAndInit());
   }
 
   @HostListener('document:keydown', ['$event'])
@@ -1529,6 +1730,9 @@ export class AppComponent implements OnInit, OnDestroy {
   handleSwitchTab(tab: 'generate' | 'gallery' | 'config' | 'models') {
     this.activeTab = tab;
     if (tab === 'gallery') this.loadGallery();
+    if (tab === 'config' && this.isAdmin) {
+      this.loadAdminUsers();
+    }
   }
 
   checkHealth() {
@@ -1958,6 +2162,15 @@ export class AppComponent implements OnInit, OnDestroy {
           this.authService.setToken(res.token);
         }
         this.isAuthEnabled = !!res?.auth_enabled;
+        this.authService.checkStatus().subscribe({
+          next: (s) => {
+            this.applyAuthStatus(s);
+            if (this.isAdmin && this.activeTab === 'config') {
+              this.loadAdminUsers();
+            }
+          },
+          error: () => {},
+        });
         if (res?.auth_activated) {
           this.showToast('Autenticaci\u00f3n activada', 'success');
         } else {
