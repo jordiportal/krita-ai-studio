@@ -105,6 +105,15 @@ export interface Settings {
   strength?: string;
 }
 
+export interface LlmFilterInfo {
+  mandatory: boolean;
+  user_enabled: boolean;
+  effective: boolean;
+  can_toggle: boolean;
+  /** Valor de CONTENT_FILTER en el servidor (0 = filtro LLM opcional) */
+  content_filter_level: number;
+}
+
 export interface ComfyConfig {
   comfyui_host: string;
   comfyui_port: string;
@@ -114,6 +123,16 @@ export interface ComfyConfig {
   auth_pass?: string;
   civitai_api_key?: string;
   civitai_nsfw_level?: string;
+  /** Base URL tipo https://api.openai.com/v1 (API compatible OpenAI) */
+  openai_api_base?: string;
+  openai_api_key?: string;
+  openai_model?: string;
+  openai_organization?: string;
+  llm_temperature?: string;
+  llm_max_tokens?: string;
+  /** Persistido en SQLite; el servidor puede forzar "true" si CONTENT_FILTER != 0 */
+  llm_content_filter?: string;
+  llm_filter?: LlmFilterInfo;
 }
 
 export interface ConnectionTestResult {
@@ -121,6 +140,15 @@ export interface ConnectionTestResult {
   url: string;
   message: string;
   vram_gb?: number;
+}
+
+export interface LlmTestResult {
+  status: string;
+  message: string;
+}
+
+export interface PromptEnhanceResponse {
+  prompt: string;
 }
 
 export interface GalleryItem {
@@ -187,6 +215,24 @@ export interface ModelTypeOption {
   value: string;
 }
 
+export interface ModelFavoriteEntry {
+  folder: string;
+  filename: string;
+  label: string;
+  sort_order: number;
+}
+
+export interface ModelFavoritesResponse {
+  favorites: ModelFavoriteEntry[];
+}
+
+export interface ModelFavoritePutPayload {
+  folder: string;
+  filename: string;
+  label?: string;
+  sort_order?: number;
+}
+
 export interface InventoryItem {
   filename: string;
   folder: string;
@@ -198,6 +244,9 @@ export interface InventoryItem {
   from_civitai: boolean;
   civitai_name: string | null;
   civitai_model_id: number | null;
+  /** Marcado para la lista reducida del selector de modelo en Generar imagen */
+  is_favorite?: boolean;
+  favorite_label?: string | null;
 }
 
 export interface InventoryCategory {

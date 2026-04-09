@@ -60,6 +60,21 @@ def resolve_lora_filename(lora_name: str, available_loras: List[str]) -> str | N
     return None
 
 
+def _normalize_sampler_choice(s: str) -> str:
+    """Vacío, solo espacios o 'auto' → dejar que la arquitectura elija."""
+    t = (s or "").strip()
+    if not t or t.lower() == "auto":
+        return ""
+    return t
+
+
+def _normalize_scheduler_choice(s: str) -> str:
+    t = (s or "").strip()
+    if not t or t.lower() == "auto":
+        return ""
+    return t
+
+
 def build_txt2img_workflow(
     arch_config: Dict[str, Any],
     prompt: str,
@@ -91,8 +106,10 @@ def build_txt2img_workflow(
     """
 
     sampling = arch_config.get("sampling", {})
-    actual_sampler = sampler if sampler else sampling.get("sampler", "euler")
-    actual_scheduler = scheduler if scheduler else sampling.get("scheduler", "normal")
+    sn = _normalize_sampler_choice(sampler)
+    zn = _normalize_scheduler_choice(scheduler)
+    actual_sampler = sn if sn else sampling.get("sampler", "euler")
+    actual_scheduler = zn if zn else sampling.get("scheduler", "normal")
     actual_steps = steps if steps > 0 else sampling.get("steps", 20)
     actual_cfg = cfg if cfg > 0 else sampling.get("cfg", 7.0)
 
@@ -389,8 +406,10 @@ def build_txt2video_workflow(
     - WEBP sin pérdida por defecto (menos bandas de color)
     """
     sampling = arch_config.get("sampling", {})
-    actual_sampler = sampler if sampler else sampling.get("sampler", "euler")
-    actual_scheduler = scheduler if scheduler else sampling.get("scheduler", "simple")
+    sn = _normalize_sampler_choice(sampler)
+    zn = _normalize_scheduler_choice(scheduler)
+    actual_sampler = sn if sn else sampling.get("sampler", "euler")
+    actual_scheduler = zn if zn else sampling.get("scheduler", "simple")
     actual_steps = steps if steps > 0 else sampling.get("steps", 20)
     actual_cfg = cfg if cfg > 0 else float(sampling.get("cfg", 1.0))
 

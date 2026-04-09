@@ -6,8 +6,8 @@ import { GenerationService } from './generation.service';
 import { AuthService } from './auth.service';
 import {
   Model, GenerationRequest, GenerationVideoRequest, Settings, ComfyConfig,
-  ConnectionTestResult, GalleryItem, CachedModel, ModelTypeOption,
-  InventoryCategory, InventoryItem, Architecture, VideoModel,
+  ConnectionTestResult, LlmTestResult, GalleryItem, CachedModel, ModelTypeOption,
+  InventoryCategory, InventoryItem, Architecture, VideoModel, ModelFavoriteEntry,
   MissingLoraResult, MissingLoraCandidate,
 } from './types';
 
@@ -70,7 +70,17 @@ import {
       <ng-container *ngIf="activeTab === 'generate'">
         <div class="card">
           <div class="input-group">
-            <label>Prompt</label>
+            <div class="prompt-label-row">
+              <label>Prompt</label>
+              <button
+                type="button"
+                class="btn btn-secondary btn-compact"
+                (click)="handleEnhancePrompt()"
+                [disabled]="enhancingPrompt || !prompt.trim()">
+                <span *ngIf="enhancingPrompt" class="spinner"></span>
+                <span>{{ enhancingPrompt ? 'Mejorando...' : 'Mejorar con IA' }}</span>
+              </button>
+            </div>
             <textarea
               class="textarea-field"
               [(ngModel)]="prompt"
@@ -103,14 +113,26 @@ import {
           <!-- Image: modelo + resoluci&oacute;n (mismo patr&oacute;n que v&iacute;deo) -->
           <div class="input-group" *ngIf="generationMode === 'image'">
             <label>Modelo</label>
-            <select class="input-field" [(ngModel)]="selectedModel" (ngModelChange)="handleModelChange($event)">
-              <optgroup label="Checkpoints" *ngIf="getModelsByType('checkpoint').length > 0">
-                <option *ngFor="let model of getModelsByType('checkpoint')" [value]="model.name">{{ model.name }}</option>
-              </optgroup>
-              <optgroup label="Diffusion Models" *ngIf="getModelsByType('diffusion_model').length > 0">
-                <option *ngFor="let model of getModelsByType('diffusion_model')" [value]="model.name">{{ model.name }}</option>
-              </optgroup>
-              <option *ngIf="models.length === 0" value="">Cargando...</option>
+            <select
+              class="input-field"
+              [(ngModel)]="selectedModel"
+              (ngModelChange)="handleMainImageModelSelectChange($event)">
+              <ng-container *ngIf="!useFavoriteShortcutsForMainModel(); else mainModelFavOpts">
+                <optgroup label="Checkpoints" *ngIf="getModelsByType('checkpoint').length > 0">
+                  <option *ngFor="let model of getModelsByType('checkpoint')" [value]="model.name">{{ model.name }}</option>
+                </optgroup>
+                <optgroup label="Diffusion Models" *ngIf="getModelsByType('diffusion_model').length > 0">
+                  <option *ngFor="let model of getModelsByType('diffusion_model')" [value]="model.name">{{ model.name }}</option>
+                </optgroup>
+                <option *ngIf="models.length === 0" value="">Cargando...</option>
+              </ng-container>
+              <ng-template #mainModelFavOpts>
+                <optgroup label="Favoritos (selector principal)">
+                  <option *ngFor="let p of getMainImageModelPickList()" [value]="p.name">{{ p.display }}</option>
+                </optgroup>
+                <option *ngIf="models.length === 0" value="">Cargando...</option>
+              </ng-template>
+              <option [value]="modelPickAdvanced" class="opt-advanced-pick" *ngIf="models.length > 0">&#9881; Avanzado&#8230;</option>
             </select>
           </div>
 
@@ -202,6 +224,22 @@ import {
           </button>
 
           <div *ngIf="showAdvanced" class="advanced-body">
+            <div class="input-group" *ngIf="generationMode === 'image'">
+              <label>Modelo (lista completa)</label>
+              <select
+                class="input-field"
+                [(ngModel)]="selectedModel"
+                (ngModelChange)="handleModelChange($event)">
+                <optgroup label="Checkpoints" *ngIf="getModelsByType('checkpoint').length > 0">
+                  <option *ngFor="let model of getModelsByType('checkpoint')" [value]="model.name">{{ model.name }}</option>
+                </optgroup>
+                <optgroup label="Diffusion Models" *ngIf="getModelsByType('diffusion_model').length > 0">
+                  <option *ngFor="let model of getModelsByType('diffusion_model')" [value]="model.name">{{ model.name }}</option>
+                </optgroup>
+                <option *ngIf="models.length === 0" value="">Cargando...</option>
+              </select>
+            </div>
+
             <div class="input-group">
               <label>Negative Prompt</label>
               <textarea
@@ -463,6 +501,117 @@ import {
             </div>
           </div>
 
+          <h2 class="card-title" style="margin-top: 24px;">Mejora de prompts (OpenAI)</h2>
+          <p class="auth-hint">Compatible con la API de chat de OpenAI y servidores con el mismo esquema (base URL hasta <code>/v1</code>). La clave se guarda en el servidor; las llamadas salen desde el backend. El texto mejorado se devuelve en <strong>ingl&eacute;s</strong> (adecuado para muchos modelos de v&iacute;deo chinos).</p>
+
+          <div class="input-group">
+            <label>Base URL de la API</label>
+            <input
+              class="input-field"
+              type="text"
+              [(ngModel)]="openaiApiBase"
+              placeholder="https://api.openai.com/v1">
+          </div>
+
+          <div class="input-group">
+            <label>API Key</label>
+            <input
+              class="input-field"
+              type="password"
+              [(ngModel)]="openaiApiKey"
+              placeholder="sk-..."
+              autocomplete="off">
+          </div>
+
+          <div class="settings-grid">
+            <div class="input-group">
+              <label>Modelo</label>
+              <input
+                class="input-field"
+                type="text"
+                [(ngModel)]="openaiModel"
+                placeholder="gpt-4o-mini">
+            </div>
+            <div class="input-group">
+              <label>Organizaci&oacute;n (opcional)</label>
+              <input
+                class="input-field"
+                type="text"
+                [(ngModel)]="openaiOrganization"
+                placeholder="org-..."
+                autocomplete="off">
+            </div>
+          </div>
+
+          <div class="settings-grid">
+            <div class="input-group">
+              <label>Temperatura</label>
+              <input
+                class="input-field"
+                type="number"
+                step="0.1"
+                min="0"
+                max="2"
+                [(ngModel)]="llmTemperature">
+            </div>
+            <div class="input-group">
+              <label>M&aacute;x. tokens</label>
+              <input
+                class="input-field"
+                type="number"
+                min="32"
+                max="4096"
+                [(ngModel)]="llmMaxTokens">
+            </div>
+          </div>
+
+          <div class="input-group" style="margin-top: 8px;">
+            <label>Filtro de contenido (LLM)</label>
+            <div class="content-filter-header">
+              <span
+                class="content-filter-badge"
+                [class.level-0]="llmFilterCanToggle"
+                [class.level-1]="!llmFilterCanToggle">
+                {{ llmFilterMandatory ? 'Obligatorio si CONTENT_FILTER no es 0' : 'Opcional (CONTENT_FILTER=0)' }}
+              </span>
+            </div>
+            <p class="auth-hint" style="margin-top: 6px;">
+              Independiente de &laquo;Mejorar con IA&raquo;: si est&aacute; activo, el backend llama al LLM <strong>justo antes de ComfyUI</strong> y sustituye en el prompt principal (el que escribes o el ya mejorado) fragmentos inapropiados por equivalentes PG-13. Requiere API key.
+            </p>
+            <div class="nsfw-toggle-row" [class.disabled]="!llmFilterCanToggle">
+              <div class="nsfw-toggle-info">
+                <span class="nsfw-toggle-label">Filtro LLM</span>
+                <span class="nsfw-toggle-desc">Paso interno previo a ComfyUI sobre el prompt positivo</span>
+              </div>
+              <label class="toggle-switch">
+                <input
+                  type="checkbox"
+                  [checked]="llmFilterMandatory || llmContentFilterUserEnabled"
+                  [disabled]="!llmFilterCanToggle"
+                  (change)="toggleLlmContentFilter()">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="config-actions">
+            <button
+              class="btn btn-secondary"
+              (click)="handleTestLlm()"
+              [disabled]="testingLlm">
+              <span *ngIf="testingLlm" class="spinner"></span>
+              <span>{{ testingLlm ? 'Probando...' : 'Probar OpenAI' }}</span>
+            </button>
+          </div>
+
+          <div
+            *ngIf="llmTestResult"
+            class="connection-result"
+            [class.success]="llmTestResult.status === 'ok'"
+            [class.error]="llmTestResult.status === 'error'">
+            {{ llmTestResult.message }}
+          </div>
+
           <div class="config-actions">
             <button
               class="btn btn-secondary"
@@ -634,6 +783,11 @@ import {
             <input class="input-field" type="text" [(ngModel)]="inventoryFilter"
                    placeholder="Filtrar por nombre...">
           </div>
+          <p class="inv-hint" *ngIf="inventoryCategories.length > 0">
+            En <strong>Modelos de Imagen</strong> o <strong>Modelos de V&iacute;deo</strong>, marca
+            <em>Selector principal</em> y opcionalmente un nombre corto: esos modelos son los que ver&aacute;s en el desplegable
+            de <strong>Generar &gt; Modelo</strong> (la lista completa sigue en Opciones avanzadas).
+          </p>
 
           <!-- Categories -->
           <div class="inv-categories" *ngIf="inventoryCategories.length > 0">
@@ -648,17 +802,33 @@ import {
               </div>
               <div class="inv-category-items" *ngIf="!inventoryCollapsed[cat.key]">
                 <div class="inv-item" *ngFor="let item of getFilteredItems(cat)">
-                  <div class="inv-item-info" (click)="handleOpenOverrideModal(item)" style="cursor:pointer"
-                       tabindex="0" role="button" aria-label="Configurar modelo">
-                    <span class="inv-item-name">{{ item.civitai_name || item.filename }}</span>
-                    <div class="inv-item-meta">
-                      <span class="inv-arch-badge" *ngIf="item.architecture">{{ item.architecture_label || item.architecture }}</span>
-                      <span class="inv-base-badge" *ngIf="item.base_model">{{ item.base_model }}</span>
-                      <span class="inv-civitai-badge" *ngIf="item.from_civitai">CivitAI</span>
-                      <span class="inv-override-badge" *ngIf="item.has_override" title="Tiene overrides personalizados">&#9881;</span>
-                      <span class="inv-item-size">{{ formatBytes(item.size_bytes) }}</span>
+                  <div class="inv-item-main">
+                    <div class="inv-item-info" (click)="handleOpenOverrideModal(item)" style="cursor:pointer"
+                         tabindex="0" role="button" aria-label="Configurar modelo">
+                      <span class="inv-item-name">{{ item.civitai_name || item.filename }}</span>
+                      <div class="inv-item-meta">
+                        <span class="inv-arch-badge" *ngIf="item.architecture">{{ item.architecture_label || item.architecture }}</span>
+                        <span class="inv-base-badge" *ngIf="item.base_model">{{ item.base_model }}</span>
+                        <span class="inv-civitai-badge" *ngIf="item.from_civitai">CivitAI</span>
+                        <span class="inv-override-badge" *ngIf="item.has_override" title="Tiene overrides personalizados">&#9881;</span>
+                        <span class="inv-item-size">{{ formatBytes(item.size_bytes) }}</span>
+                      </div>
+                      <span class="inv-item-file" *ngIf="item.civitai_name">{{ item.filename }}</span>
                     </div>
-                    <span class="inv-item-file" *ngIf="item.civitai_name">{{ item.filename }}</span>
+                    <div class="inv-fav-row" *ngIf="isPrincipalSelectorInventoryCategory(cat.key)"
+                         (click)="$event.stopPropagation()">
+                      <label class="inv-fav-check">
+                        <input type="checkbox" [checked]="item.is_favorite"
+                               (change)="handleToggleModelFavorite(item, $any($event.target).checked)" />
+                        <span>Selector principal</span>
+                      </label>
+                      <input *ngIf="item.is_favorite" type="text" class="input-field inv-fav-short"
+                             [value]="item.favorite_label || ''"
+                             #favShort
+                             (blur)="handleSaveFavoriteLabel(item, favShort.value)"
+                             (keydown.enter)="favShort.blur()"
+                             placeholder="Nombre corto en el desplegable" />
+                    </div>
                   </div>
                   <button class="cache-delete-btn" (click)="handleDeleteInventoryItem(item, $event)"
                           aria-label="Eliminar modelo" title="Eliminar de ComfyUI">&#128465;</button>
@@ -1090,6 +1260,11 @@ import {
       background: var(--bg-input); padding: 10px 14px; border-radius: 8px;
       margin-bottom: 16px; word-break: break-all;
     }
+    .prompt-label-row {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px;
+    }
+    .prompt-label-row label { margin-bottom: 0; }
+    .btn-compact { padding: 6px 12px; font-size: 13px; white-space: nowrap; flex-shrink: 0; }
     .config-actions { display: flex; gap: 12px; margin-bottom: 12px; }
     .config-actions .btn { flex: 1; }
     .connection-result { padding: 12px 16px; border-radius: 10px; font-size: 14px; font-weight: 500; }
@@ -1099,6 +1274,7 @@ import {
     .last-result-img { flex: 1; width: 100%; border-radius: 12px; cursor: pointer; }
     .last-result-img:active { transform: scale(0.98); }
     .auth-hint { font-size: 13px; color: var(--text-secondary); margin-bottom: 12px; line-height: 1.4; }
+    .opt-advanced-pick { font-weight: 600; color: var(--accent, #6366f1); }
   `]
 })
 export class AppComponent implements OnInit, OnDestroy {
@@ -1183,6 +1359,12 @@ export class AppComponent implements OnInit, OnDestroy {
 
   prompt = '';
   negativePrompt = 'nsfw, explicit, worst quality, worst aesthetic, bad quality, average quality, oldest, old, very displeasing, displeasing';
+  /** Valor centinela: no es un checkpoint; abre opciones avanzadas */
+  readonly modelPickAdvanced = '__KAS_ADVANCED__';
+  /** &Uacute;ltimo modelo real de imagen (para restaurar tras elegir Avanzado) */
+  lastRealImageModel = '';
+  /** Favoritos para la lista reducida del selector principal de imagen */
+  modelFavoriteEntries: ModelFavoriteEntry[] = [];
   selectedModel = 'novaAnimeXL_ilV125.safetensors';
   sampler = '';
   steps = 0;
@@ -1222,6 +1404,20 @@ export class AppComponent implements OnInit, OnDestroy {
   testingConnection = false;
   savingConfig = false;
   connectionTestResult: ConnectionTestResult | null = null;
+
+  openaiApiBase = '';
+  openaiApiKey = '';
+  openaiModel = 'gpt-4o-mini';
+  openaiOrganization = '';
+  llmTemperature = '0.7';
+  llmMaxTokens = '512';
+  testingLlm = false;
+  llmTestResult: LlmTestResult | null = null;
+  enhancingPrompt = false;
+
+  llmFilterMandatory = false;
+  llmFilterCanToggle = true;
+  llmContentFilterUserEnabled = false;
 
   galleryItems: GalleryItem[] = [];
   galleryTotal = 0;
@@ -1290,6 +1486,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.loadSettings();
     this.loadGallery();
     this.loadVideoModels();
+    this.loadModelFavorites();
     this.healthInterval = setInterval(() => this.checkHealth(), 30000);
   }
 
@@ -1360,6 +1557,20 @@ export class AppComponent implements OnInit, OnDestroy {
         if (cfg.auth_enabled !== undefined) {
           this.isAuthEnabled = cfg.auth_enabled;
         }
+        this.openaiApiBase = cfg.openai_api_base || 'https://api.openai.com/v1';
+        this.openaiApiKey = cfg.openai_api_key || '';
+        this.openaiModel = cfg.openai_model || 'gpt-4o-mini';
+        this.openaiOrganization = cfg.openai_organization || '';
+        this.llmTemperature = cfg.llm_temperature != null && cfg.llm_temperature !== ''
+          ? String(cfg.llm_temperature) : '0.7';
+        this.llmMaxTokens = cfg.llm_max_tokens != null && cfg.llm_max_tokens !== ''
+          ? String(cfg.llm_max_tokens) : '512';
+        const lf = cfg.llm_filter;
+        if (lf) {
+          this.llmFilterMandatory = !!lf.mandatory;
+          this.llmFilterCanToggle = !!lf.can_toggle;
+          this.llmContentFilterUserEnabled = lf.mandatory ? true : !!lf.user_enabled;
+        }
       },
       error: () => {}
     });
@@ -1380,6 +1591,12 @@ export class AppComponent implements OnInit, OnDestroy {
         if (!this.selectedModel && this.models.length > 0) {
           this.selectedModel = this.models[0].name;
         }
+        if (this.selectedModel && this.selectedModel !== this.modelPickAdvanced) {
+          const im = this.models.find(
+            m => m.name === this.selectedModel && (m.type === 'checkpoint' || m.type === 'diffusion_model')
+          );
+          if (im) this.lastRealImageModel = this.selectedModel;
+        }
       },
       error: () => {}
     });
@@ -1396,6 +1613,13 @@ export class AppComponent implements OnInit, OnDestroy {
     this.generationService.getVideoModels().subscribe({
       next: (data) => { this.videoModels = data.models || []; },
       error: () => { this.videoModels = []; }
+    });
+  }
+
+  loadModelFavorites() {
+    this.generationService.getModelFavorites().subscribe({
+      next: (res) => { this.modelFavoriteEntries = res.favorites || []; },
+      error: () => { this.modelFavoriteEntries = []; }
     });
   }
 
@@ -1434,7 +1658,12 @@ export class AppComponent implements OnInit, OnDestroy {
   loadSettings() {
     this.generationService.getSettings().subscribe({
       next: (s: Settings) => {
-        if (s.checkpoint) this.selectedModel = s.checkpoint;
+        if (s.checkpoint) {
+          this.selectedModel = s.checkpoint;
+          if (s.checkpoint !== this.modelPickAdvanced) {
+            this.lastRealImageModel = s.checkpoint;
+          }
+        }
         if (s.sampler !== undefined) this.sampler = s.sampler;
         if (s.steps) this.steps = Number(s.steps) || 0;
         if (s.cfg) this.cfg = Number(s.cfg) || 0;
@@ -1553,7 +1782,7 @@ export class AppComponent implements OnInit, OnDestroy {
       id: `result-${i}`,
       prompt: this.prompt,
       neg_prompt: this.negativePrompt,
-      checkpoint: this.selectedModel,
+      checkpoint: this.effectiveImageCheckpoint(),
       width: this.width,
       height: this.height,
       filename: '',
@@ -1635,6 +1864,54 @@ export class AppComponent implements OnInit, OnDestroy {
 
   // ─── Config ────────────────────────────────────────────────────────────
 
+  handleTestLlm() {
+    this.testingLlm = true;
+    this.llmTestResult = null;
+    this.generationService.testLlm({
+      openai_api_base: this.openaiApiBase,
+      openai_api_key: this.openaiApiKey,
+      openai_model: this.openaiModel,
+      openai_organization: this.openaiOrganization,
+    }).subscribe({
+      next: (r) => {
+        this.testingLlm = false;
+        this.llmTestResult = r;
+      },
+      error: (err) => {
+        this.testingLlm = false;
+        const d = err?.error?.detail;
+        this.llmTestResult = {
+          status: 'error',
+          message: typeof d === 'string' ? d : 'Error al probar OpenAI',
+        };
+      },
+    });
+  }
+
+  handleEnhancePrompt() {
+    const p = (this.prompt || '').trim();
+    if (!p) {
+      this.showToast('Escribe un prompt', 'error');
+      return;
+    }
+    this.enhancingPrompt = true;
+    this.generationService.enhancePrompt(p).subscribe({
+      next: (res) => {
+        this.enhancingPrompt = false;
+        if (res?.prompt) {
+          this.prompt = res.prompt;
+          this.showToast('Prompt actualizado', 'success');
+        }
+      },
+      error: (err) => {
+        this.enhancingPrompt = false;
+        const d = err?.error?.detail;
+        const msg = typeof d === 'string' ? d : 'No se pudo mejorar el prompt';
+        this.showToast(msg, 'error');
+      },
+    });
+  }
+
   handleTestConnection() {
     this.testingConnection = true;
     this.connectionTestResult = null;
@@ -1665,6 +1942,15 @@ export class AppComponent implements OnInit, OnDestroy {
       auth_pass: this.authPass,
       civitai_api_key: this.civitaiApiKey,
       civitai_nsfw_level: this.civitaiNsfwLevel,
+      openai_api_base: this.openaiApiBase,
+      openai_api_key: this.openaiApiKey,
+      openai_model: this.openaiModel,
+      openai_organization: this.openaiOrganization,
+      llm_temperature: this.llmTemperature,
+      llm_max_tokens: this.llmMaxTokens,
+      llm_content_filter: this.llmFilterMandatory
+        ? 'true'
+        : (this.llmContentFilterUserEnabled ? 'true' : 'false'),
     }).subscribe({
       next: (res: any) => {
         this.savingConfig = false;
@@ -1679,6 +1965,15 @@ export class AppComponent implements OnInit, OnDestroy {
         }
         this.checkHealth();
         this.loadModels();
+        if (res?.openai_api_key) {
+          this.openaiApiKey = res.openai_api_key;
+        }
+        const lf = res?.llm_filter;
+        if (lf) {
+          this.llmFilterMandatory = !!lf.mandatory;
+          this.llmFilterCanToggle = !!lf.can_toggle;
+          this.llmContentFilterUserEnabled = lf.mandatory ? true : !!lf.user_enabled;
+        }
       },
       error: () => {
         this.savingConfig = false;
@@ -1717,7 +2012,7 @@ export class AppComponent implements OnInit, OnDestroy {
       steps: this.steps,
       cfg_scale: this.cfg,
       sampler: this.sampler,
-      checkpoint: this.selectedModel,
+      checkpoint: this.effectiveImageCheckpoint(),
       seed: -1,
       strength: this.strength,
     };
@@ -2502,8 +2797,7 @@ export class AppComponent implements OnInit, OnDestroy {
       const modelName = meta.Model || meta.model || meta.checkpoint;
       // Only set if model exists in available models
       if (this.models.some(m => m.name === modelName)) {
-        this.selectedModel = modelName;
-        this.handleSaveSetting('checkpoint', modelName);
+        this.handleModelChange(modelName);
       }
     }
     this.imageMetaOpen = false;
@@ -2518,14 +2812,132 @@ export class AppComponent implements OnInit, OnDestroy {
     return this.models.filter(m => m.type === type);
   }
 
+  /** Primer checkpoint o diffusion model disponible (respaldo). */
+  firstImageModelName(): string {
+    const c = this.getModelsByType('checkpoint');
+    const d = this.getModelsByType('diffusion_model');
+    return c[0]?.name || d[0]?.name || this.lastRealImageModel || this.selectedModel;
+  }
+
+  /** Nunca enviar el valor centinela al backend. */
+  effectiveImageCheckpoint(): string {
+    if (this.selectedModel === this.modelPickAdvanced) {
+      return this.lastRealImageModel || this.firstImageModelName();
+    }
+    return this.selectedModel;
+  }
+
   getSelectedModelType(): string | undefined {
     const found = this.models.find(m => m.name === this.selectedModel);
     return found?.type;
   }
 
+  handleMainImageModelSelectChange(value: string) {
+    if (value === this.modelPickAdvanced) {
+      this.showAdvanced = true;
+      const restore =
+        this.lastRealImageModel && this.lastRealImageModel !== this.modelPickAdvanced
+          ? this.lastRealImageModel
+          : this.firstImageModelName();
+      queueMicrotask(() => {
+        this.selectedModel = restore;
+      });
+      setTimeout(() => {
+        document.querySelector('.advanced-card')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }, 80);
+      return;
+    }
+    this.handleModelChange(value);
+  }
+
   handleModelChange(name: string) {
+    if (name === this.modelPickAdvanced) return;
     this.selectedModel = name;
+    const im = this.models.find(
+      m => m.name === name && (m.type === 'checkpoint' || m.type === 'diffusion_model')
+    );
+    if (im) {
+      this.lastRealImageModel = name;
+    }
     this.handleSaveSetting('checkpoint', name);
+  }
+
+  isPrincipalSelectorInventoryCategory(catKey: string): boolean {
+    return catKey === 'image_models' || catKey === 'video_models';
+  }
+
+  useFavoriteShortcutsForMainModel(): boolean {
+    return (this.modelFavoriteEntries || []).length > 0;
+  }
+
+  getMainImageModelPickList(): { name: string; display: string }[] {
+    const imageModels = this.models.filter(
+      m => m.type === 'checkpoint' || m.type === 'diffusion_model'
+    );
+    const folder = (t: string) => (t === 'diffusion_model' ? 'diffusion_models' : 'checkpoints');
+    const entries = this.modelFavoriteEntries || [];
+    if (!entries.length) {
+      return [];
+    }
+    const favKey = (fd: string, fn: string) => `${fd}\0${fn}`;
+    const favSet = new Set(entries.map((f) => favKey(f.folder, f.filename)));
+    const out: { name: string; display: string }[] = [];
+    const cur = imageModels.find((m) => m.name === this.selectedModel);
+    if (cur && !favSet.has(favKey(folder(cur.type), cur.name))) {
+      out.push({ name: cur.name, display: '(actual) ' + cur.name });
+    }
+    const sorted = [...entries].sort(
+      (a, b) => a.sort_order - b.sort_order || a.filename.localeCompare(b.filename)
+    );
+    for (const f of sorted) {
+      const m = imageModels.find((x) => x.name === f.filename && folder(x.type) === f.folder);
+      if (m) {
+        const disp = (f.label || '').trim() || m.name;
+        out.push({ name: m.name, display: disp });
+      }
+    }
+    if (out.length === 0) {
+      return imageModels.map((m) => ({ name: m.name, display: m.name }));
+    }
+    return out;
+  }
+
+  handleToggleModelFavorite(item: InventoryItem, checked: boolean) {
+    if (checked) {
+      const short = (item.civitai_name || item.filename).slice(0, 48);
+      this.generationService.putModelFavorite({ folder: item.folder, filename: item.filename, label: short }).subscribe({
+        next: () => {
+          item.is_favorite = true;
+          item.favorite_label = short;
+          this.loadModelFavorites();
+          this.loadInventory();
+        },
+        error: () => this.showToast('No se pudo guardar el favorito', 'error'),
+      });
+    } else {
+      this.generationService.deleteModelFavorite(item.folder, item.filename).subscribe({
+        next: () => {
+          item.is_favorite = false;
+          item.favorite_label = undefined;
+          this.loadModelFavorites();
+          this.loadInventory();
+        },
+        error: () => this.showToast('No se pudo quitar el favorito', 'error'),
+      });
+    }
+  }
+
+  handleSaveFavoriteLabel(item: InventoryItem, raw: string) {
+    if (!item.is_favorite) return;
+    const label = (raw || '').trim().slice(0, 200);
+    if (label === (item.favorite_label || '').trim()) return;
+    this.generationService.putModelFavorite({ folder: item.folder, filename: item.filename, label }).subscribe({
+      next: () => {
+        item.favorite_label = label || null;
+        this.loadModelFavorites();
+      },
+      error: () => this.showToast('No se pudo guardar la etiqueta', 'error'),
+    });
   }
 
   // ─── NSFW Level Toggles ──────────────────────────────────────────────
@@ -2544,6 +2956,11 @@ export class AppComponent implements OnInit, OnDestroy {
     let level = parseInt(this.civitaiNsfwLevel, 10) || 0;
     level ^= bit;
     this.civitaiNsfwLevel = String(level);
+  }
+
+  toggleLlmContentFilter() {
+    if (!this.llmFilterCanToggle) return;
+    this.llmContentFilterUserEnabled = !this.llmContentFilterUserEnabled;
   }
 
   // ─── Utils ─────────────────────────────────────────────────────────────

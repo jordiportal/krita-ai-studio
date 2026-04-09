@@ -112,6 +112,16 @@ def init_db():
         )
     """)
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS model_favorites (
+            folder      TEXT NOT NULL,
+            filename    TEXT NOT NULL,
+            label       TEXT NOT NULL DEFAULT '',
+            sort_order  INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (folder, filename)
+        )
+    """)
+
     # Migration: add missing columns to existing gallery table
     try:
         conn.execute("ALTER TABLE gallery ADD COLUMN seed INTEGER NOT NULL DEFAULT 0")
@@ -177,6 +187,13 @@ def init_db():
         "jwt_secret": "",
         "civitai_api_key": "",
         "civitai_nsfw_level": "",
+        "openai_api_base": os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
+        "openai_api_key": os.getenv("OPENAI_API_KEY", ""),
+        "openai_model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        "openai_organization": os.getenv("OPENAI_ORGANIZATION", ""),
+        "llm_temperature": "0.7",
+        "llm_max_tokens": "512",
+        "llm_content_filter": "false",
     }
     for k, v in config_defaults.items():
         conn.execute(
@@ -220,6 +237,41 @@ def get_comfyui_config() -> Dict[str, str]:
 
 def update_comfyui_config(data: Dict[str, str]):
     _update_table("config", data)
+
+
+def _content_filter_env_level() -> int:
+    """Misma variable CONTENT_FILTER que CivitAI (civitai.py): 0 = sin restricción; otro = política activa."""
+    try:
+        return int(os.getenv("CONTENT_FILTER", "1"))
+    except (ValueError, TypeError):
+        return 1
+
+
+def _llm_filter_mandatory() -> bool:
+    """Si CONTENT_FILTER != 0, el filtro LLM previo a ComfyUI es obligatorio."""
+    return _content_filter_env_level() != 0
+
+
+def get_llm_filter_info(cfg: Dict[str, str]) -> Dict[str, Any]:
+    mandatory = _llm_filter_mandatory()
+    raw = (cfg.get("llm_content_filter") or "false").lower()
+    user_on = raw in ("true", "1", "yes")
+    effective = mandatory or user_on
+    return {
+        "mandatory": mandatory,
+        "user_enabled": user_on,
+        "effective": effective,
+        "can_toggle": not mandatory,
+        "content_filter_level": _content_filter_env_level(),
+    }
+
+
+def _llm_prompt_filter_effective(cfg: Dict[str, str]) -> bool:
+    """¿Aplicar paso interno de filtrado del prompt antes de enviar a ComfyUI?"""
+    if _llm_filter_mandatory():
+        return True
+    raw = (cfg.get("llm_content_filter") or "false").lower()
+    return raw in ("true", "1", "yes")
 
 
 def get_comfyui_url() -> str:
@@ -393,6 +445,9 @@ _job_meta: Dict[str, Dict[str, Any]] = {}
 
 _PUBLIC_API = {"/api/auth/status", "/api/auth/login", "/api/health"}
 
+# Mismo valor que el frontend al mostrar claves guardadas (no re-enviar al guardar)
+_CONFIG_SECRET_PLACEHOLDER = "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"
+
 
 class JWTAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -473,6 +528,13 @@ class GenerationVideoRequest(BaseModel):
     clip: Optional[str] = None  # T5/UMT5 para Wan
 
 
+class ModelFavoritePayload(BaseModel):
+    folder: str
+    filename: str
+    label: str = ""
+    sort_order: Optional[int] = None
+
+
 class SettingsPayload(BaseModel):
     checkpoint: Optional[str] = None
     sampler: Optional[str] = None
@@ -493,6 +555,24 @@ class ConfigPayload(BaseModel):
     auth_pass: Optional[str] = None
     civitai_api_key: Optional[str] = None
     civitai_nsfw_level: Optional[str] = None
+    openai_api_base: Optional[str] = None
+    openai_api_key: Optional[str] = None
+    openai_model: Optional[str] = None
+    openai_organization: Optional[str] = None
+    llm_temperature: Optional[str] = None
+    llm_max_tokens: Optional[str] = None
+    llm_content_filter: Optional[str] = None
+
+
+class LLMTestPayload(BaseModel):
+    openai_api_base: Optional[str] = None
+    openai_api_key: Optional[str] = None
+    openai_model: Optional[str] = None
+    openai_organization: Optional[str] = None
+
+
+class PromptEnhanceRequest(BaseModel):
+    prompt: str
 
 
 class LoginRequest(BaseModel):
@@ -589,10 +669,13 @@ async def api_get_config():
     auth_enabled = bool(cfg.get("auth_user") and cfg.get("auth_pass"))
     safe_cfg = {**cfg, "comfyui_url": url, "auth_enabled": auth_enabled}
     if safe_cfg.get("auth_pass"):
-        safe_cfg["auth_pass"] = "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"
+        safe_cfg["auth_pass"] = _CONFIG_SECRET_PLACEHOLDER
+    if safe_cfg.get("openai_api_key"):
+        safe_cfg["openai_api_key"] = _CONFIG_SECRET_PLACEHOLDER
     safe_cfg.pop("jwt_secret", None)
     safe_cfg.pop("civitai_nsfw_level", None)
     safe_cfg["content_filter"] = get_content_filter_info()
+    safe_cfg["llm_filter"] = get_llm_filter_info(cfg)
     return safe_cfg
 
 
@@ -609,15 +692,24 @@ async def api_save_config(payload: ConfigPayload):
     data: Dict[str, str] = {}
     for field, val in payload.model_dump(exclude_none=True).items():
         if field == "auth_pass":
-            if val == "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022":
+            if val == _CONFIG_SECRET_PLACEHOLDER:
                 continue
             if val:
                 data[field] = hash_password(val)
             else:
                 data[field] = ""
+        elif field == "openai_api_key":
+            if val == _CONFIG_SECRET_PLACEHOLDER:
+                continue
+            data[field] = str(val)
+        elif field == "llm_content_filter":
+            v = str(val).lower()
+            data[field] = "true" if v in ("true", "1", "yes") else "false"
         else:
             data[field] = str(val)
     if data:
+        if _llm_filter_mandatory():
+            data["llm_content_filter"] = "true"
         update_comfyui_config(data)
 
     cfg = get_comfyui_config()
@@ -631,12 +723,16 @@ async def api_save_config(payload: ConfigPayload):
         "auth_enabled": is_auth_enabled,
     }
     if response.get("auth_pass"):
-        response["auth_pass"] = "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"
+        response["auth_pass"] = _CONFIG_SECRET_PLACEHOLDER
+    if response.get("openai_api_key"):
+        response["openai_api_key"] = _CONFIG_SECRET_PLACEHOLDER
     response.pop("jwt_secret", None)
 
     if auth_activated:
         response["token"] = create_token(cfg.get("auth_user", ""))
         response["auth_activated"] = True
+
+    response["llm_filter"] = get_llm_filter_info(cfg)
 
     return response
 
@@ -664,6 +760,182 @@ async def api_test_connection(payload: ConfigPayload):
             return {"status": "error", "url": url, "message": f"HTTP {resp.status_code}"}
     except Exception as e:
         return {"status": "error", "url": url, "message": str(e)}
+
+
+LLM_ENHANCE_BASE = (
+    "You rewrite the user's idea into one detailed prompt entirely in English for AI image or video generation "
+    "(Stable Diffusion, Wan, Chinese video models, etc.). "
+    "If the input is in any non-English language (Spanish, Chinese, Japanese, Korean, etc.), "
+    "translate the full result to clear, natural English. "
+    "Add concrete visual detail: subject, style, lighting, composition, colors, lens or camera when relevant. "
+    "Keep existing <lora:...> style tags meaningful; you may reorder them. "
+    "Reply with ONLY the improved prompt, no quotes, markdown, or preamble."
+)
+
+LLM_PROMPT_FILTER_SYSTEM = (
+    "You sanitize text-to-image and text-to-video prompts for general-audience APIs. "
+    "ONLY task: if the prompt describes sexual content, graphic violence, hate, illegal acts, or other material "
+    "unsuitable for PG-13-style APIs, replace those fragments with safe equivalents (suggestive not explicit, "
+    "stylized action not gore) while preserving scene, composition, and mood. "
+    "If nothing needs changing, return the prompt unchanged. "
+    "Do not add creative detail, do not translate unless required for the replacement. "
+    "Preserve the same language as the input. "
+    "Reply with ONLY the resulting prompt text, no quotes, markdown, or preamble."
+)
+
+
+async def _openai_chat(
+    cfg: Dict[str, str],
+    *,
+    system: str,
+    user: str,
+    max_tokens: int,
+    temperature: float,
+    timeout: float = 120.0,
+) -> str:
+    api_key = (cfg.get("openai_api_key") or "").strip()
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Falta API key de OpenAI; configúrala en Ajustes.",
+        )
+    base = (cfg.get("openai_api_base") or "https://api.openai.com/v1").strip().rstrip("/")
+    model = (cfg.get("openai_model") or "gpt-4o-mini").strip()
+    max_tok = min(max(max_tokens, 32), 4096)
+    temp = min(max(temperature, 0.0), 2.0)
+    url = f"{base}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    org = (cfg.get("openai_organization") or "").strip()
+    if org:
+        headers["OpenAI-Organization"] = org
+    oa_payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "temperature": temp,
+        "max_tokens": max_tok,
+    }
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, json=oa_payload, headers=headers, timeout=timeout)
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+    if resp.status_code != 200:
+        try:
+            err = resp.json()
+            detail = err.get("error", {}).get("message", resp.text[:400])
+        except Exception:
+            detail = resp.text[:400]
+        raise HTTPException(
+            status_code=502 if resp.status_code >= 500 else 400,
+            detail=detail or f"HTTP {resp.status_code}",
+        )
+
+    data = resp.json()
+    choices = data.get("choices") or []
+    if not choices:
+        raise HTTPException(status_code=502, detail="Respuesta vacía del modelo")
+    content = (choices[0].get("message") or {}).get("content") or ""
+    return content.strip()
+
+
+async def _maybe_apply_llm_prompt_filter(cfg: Dict[str, str], text: str) -> str:
+    """Paso interno antes de ComfyUI: reescribe el prompt positivo si el filtro está activo."""
+    raw = text if text is not None else ""
+    t = raw.strip()
+    if not t:
+        return raw
+    if not _llm_prompt_filter_effective(cfg):
+        return raw
+    try:
+        mt = int(cfg.get("llm_max_tokens") or "512")
+    except ValueError:
+        mt = 512
+    mt = min(max(mt, 32), 1024)
+    out = await _openai_chat(
+        cfg,
+        system=LLM_PROMPT_FILTER_SYSTEM.strip(),
+        user=t,
+        max_tokens=mt,
+        temperature=0.2,
+        timeout=90.0,
+    )
+    return out if out else raw
+
+
+@app.post("/api/llm/test")
+async def api_llm_test(payload: LLMTestPayload = LLMTestPayload()):
+    cfg = get_comfyui_config()
+    base = (payload.openai_api_base or cfg.get("openai_api_base") or "https://api.openai.com/v1").strip().rstrip("/")
+    key = payload.openai_api_key
+    if key is None or key == _CONFIG_SECRET_PLACEHOLDER:
+        key = cfg.get("openai_api_key", "")
+    key = (key or "").strip()
+    if not key:
+        return {"status": "error", "message": "Falta API key de OpenAI"}
+
+    headers = {"Authorization": f"Bearer {key}"}
+    org = payload.openai_organization if payload.openai_organization is not None else cfg.get("openai_organization", "")
+    org = (org or "").strip()
+    if org:
+        headers["OpenAI-Organization"] = org
+
+    url = f"{base}/models"
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, headers=headers, timeout=20.0)
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+    if resp.status_code == 200:
+        return {"status": "ok", "message": "Conexión OpenAI correcta"}
+    try:
+        body = resp.json()
+        msg = body.get("error", {}).get("message", resp.text[:300])
+    except Exception:
+        msg = resp.text[:300]
+    return {"status": "error", "message": f"HTTP {resp.status_code}: {msg}"}
+
+
+@app.post("/api/prompt/enhance")
+async def api_prompt_enhance(body: PromptEnhanceRequest):
+    text = (body.prompt or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Prompt vacío")
+
+    cfg = get_comfyui_config()
+    api_key = (cfg.get("openai_api_key") or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="Configura la API key de OpenAI en Ajustes")
+
+    try:
+        temp = float(cfg.get("llm_temperature") or "0.7")
+    except ValueError:
+        temp = 0.7
+    try:
+        max_tok = int(cfg.get("llm_max_tokens") or "512")
+    except ValueError:
+        max_tok = 512
+    max_tok = min(max(max_tok, 32), 4096)
+    temp = min(max(temp, 0.0), 2.0)
+
+    content = await _openai_chat(
+        cfg,
+        system=LLM_ENHANCE_BASE.strip(),
+        user=text,
+        max_tokens=max_tok,
+        temperature=temp,
+        timeout=120.0,
+    )
+    if not content:
+        raise HTTPException(status_code=502, detail="El modelo no devolvió texto")
+    return {"prompt": content}
 
 
 # ─── Settings endpoints ──────────────────────────────────────────────────────
@@ -907,6 +1179,36 @@ INVENTORY_CATEGORIES = {
     },
 }
 
+# Carpetas cuyos archivos pueden aparecer en el selector principal de imagen
+FAVORITE_MODEL_FOLDERS = frozenset({"checkpoints", "diffusion_models"})
+
+
+def _load_model_favorites_map() -> Dict[tuple, Dict[str, Any]]:
+    out: Dict[tuple, Dict[str, Any]] = {}
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+        for r in conn.execute("SELECT folder, filename, label, sort_order FROM model_favorites"):
+            out[(r["folder"], r["filename"])] = {
+                "label": r["label"] or "",
+                "sort_order": int(r["sort_order"] or 0),
+            }
+        conn.close()
+    except Exception:
+        pass
+    return out
+
+
+def _db_list_model_favorites() -> List[Dict[str, Any]]:
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT folder, filename, label, sort_order FROM model_favorites ORDER BY sort_order, filename"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 BASE_MODEL_PATTERNS = [
     ("Hunyuan", ["hunyuan"]),
     ("LTX Video", ["ltx"]),
@@ -951,6 +1253,8 @@ async def get_inventory():
     except Exception:
         pass
 
+    fav_map = _load_model_favorites_map()
+
     # Obtener modelos del plugin KAS
     all_models: Dict[str, list] = {}
     try:
@@ -985,6 +1289,7 @@ async def get_inventory():
                 arch_label = arch_mgr.architectures.get(arch_id, {}).get("label", arch_id)
                 override = arch_mgr.get_override(fname)
 
+                fav = fav_map.get((folder_name, fname))
                 item = {
                     "filename": fname,
                     "folder": folder_name,
@@ -996,6 +1301,8 @@ async def get_inventory():
                     "from_civitai": civitai_info is not None,
                     "civitai_name": civitai_info["name"] if civitai_info else None,
                     "civitai_model_id": civitai_info["civitai_model_id"] if civitai_info else None,
+                    "is_favorite": fav is not None,
+                    "favorite_label": fav["label"] if fav else None,
                 }
                 items.append(item)
                 cat_size += size
@@ -1035,6 +1342,59 @@ async def get_inventory():
         "total_bytes": total_size,
         "active_downloads": active_downloads,
     }
+
+
+@app.get("/api/model-favorites")
+async def api_list_model_favorites():
+    return {"favorites": _db_list_model_favorites()}
+
+
+@app.put("/api/model-favorites")
+async def api_upsert_model_favorite(payload: ModelFavoritePayload):
+    folder = (payload.folder or "").strip()
+    filename = (payload.filename or "").strip()
+    if folder not in FAVORITE_MODEL_FOLDERS:
+        raise HTTPException(status_code=400, detail="Carpeta no permitida para favoritos")
+    if not filename:
+        raise HTTPException(status_code=400, detail="filename requerido")
+    label = (payload.label or "").strip()[:200]
+    conn = sqlite3.connect(str(DB_PATH))
+    exists = conn.execute(
+        "SELECT sort_order FROM model_favorites WHERE folder = ? AND filename = ?",
+        (folder, filename),
+    ).fetchone()
+    if exists:
+        if payload.sort_order is not None:
+            conn.execute(
+                "UPDATE model_favorites SET label = ?, sort_order = ? WHERE folder = ? AND filename = ?",
+                (label, int(payload.sort_order), folder, filename),
+            )
+        else:
+            conn.execute(
+                "UPDATE model_favorites SET label = ? WHERE folder = ? AND filename = ?",
+                (label, folder, filename),
+            )
+    else:
+        row = conn.execute("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM model_favorites").fetchone()
+        so = int(payload.sort_order) if payload.sort_order is not None else int(row[0])
+        conn.execute(
+            "INSERT INTO model_favorites (folder, filename, label, sort_order) VALUES (?, ?, ?, ?)",
+            (folder, filename, label, so),
+        )
+    conn.commit()
+    conn.close()
+    return {"status": "ok"}
+
+
+@app.delete("/api/model-favorites/{folder}/{filename:path}")
+async def api_delete_model_favorite(folder: str, filename: str):
+    if folder not in FAVORITE_MODEL_FOLDERS:
+        raise HTTPException(status_code=400, detail="Carpeta no permitida")
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute("DELETE FROM model_favorites WHERE folder = ? AND filename = ?", (folder, filename))
+    conn.commit()
+    conn.close()
+    return {"status": "ok"}
 
 
 @app.delete("/api/inventory/{folder}/{filename}")
@@ -1293,6 +1653,7 @@ async def get_samplers():
 @app.post("/api/generate/txt2img", response_model=GenerationResponse)
 async def txt2img(request: GenerationRequest):
     comfy_url = get_comfyui_url()
+    cfg = get_comfyui_config()
     try:
         actual_seed = request.seed
         if actual_seed < 0:
@@ -1342,6 +1703,7 @@ async def txt2img(request: GenerationRequest):
                 )
 
         prompt_text = clean_prompt if lora_tags else request.prompt
+        prompt_text = await _maybe_apply_llm_prompt_filter(cfg, prompt_text)
         model_name = request.checkpoint or "SDXL.safetensors"
 
         arch_mgr = get_arch_manager()
@@ -1383,7 +1745,7 @@ async def txt2img(request: GenerationRequest):
             prompt_id = result.get("prompt_id")
 
             _job_meta[prompt_id] = {
-                "prompt": request.prompt,
+                "prompt": prompt_text,
                 "neg_prompt": request.negative_prompt or "",
                 "checkpoint": request.checkpoint or "",
                 "width": request.width,
@@ -1662,6 +2024,7 @@ async def proxy_video(video_id: str):
 async def txt2video(request: GenerationVideoRequest):
     """Genera video usando Wan 2.x T2V via workflow con soporte LoRA."""
     comfy_url = get_comfyui_url()
+    cfg = get_comfyui_config()
     try:
         actual_seed = request.seed
         if actual_seed < 0:
@@ -1720,6 +2083,7 @@ async def txt2video(request: GenerationVideoRequest):
                 )
 
         prompt_text = clean_prompt if lora_tags else request.prompt
+        prompt_text = await _maybe_apply_llm_prompt_filter(cfg, prompt_text)
 
         arch_mgr = get_arch_manager()
         video_arch_config = arch_mgr.resolve(video_checkpoint)
@@ -1771,7 +2135,7 @@ async def txt2video(request: GenerationVideoRequest):
             prompt_id = result.get("prompt_id")
 
             _job_meta[prompt_id] = {
-                "prompt": request.prompt,
+                "prompt": prompt_text,
                 "neg_prompt": request.negative_prompt or "",
                 "checkpoint": video_checkpoint,
                 "width": request.width,

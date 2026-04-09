@@ -12,9 +12,13 @@ import {
   Settings,
   ComfyConfig,
   ConnectionTestResult,
+  LlmTestResult,
+  PromptEnhanceResponse,
   GalleryResponse,
   CacheResponse,
   InventoryResponse,
+  ModelFavoritesResponse,
+  ModelFavoritePutPayload,
   ArchitecturesResponse,
   ModelOverrideResponse,
   ModelOverridesListResponse,
@@ -58,6 +62,14 @@ export class GenerationService {
 
   testConnection(data: Partial<ComfyConfig>): Observable<ConnectionTestResult> {
     return this.http.post<ConnectionTestResult>(`${this.apiUrl}/config/test`, data);
+  }
+
+  testLlm(data: Partial<ComfyConfig>): Observable<LlmTestResult> {
+    return this.http.post<LlmTestResult>(`${this.apiUrl}/llm/test`, data);
+  }
+
+  enhancePrompt(prompt: string): Observable<PromptEnhanceResponse> {
+    return this.http.post<PromptEnhanceResponse>(`${this.apiUrl}/prompt/enhance`, { prompt });
   }
 
   generateTxt2Img(request: GenerationRequest): Observable<GenerationResponse> {
@@ -150,6 +162,20 @@ export class GenerationService {
 
   getInventory(): Observable<InventoryResponse> {
     return this.http.get<InventoryResponse>(`${this.apiUrl}/inventory`);
+  }
+
+  getModelFavorites(): Observable<ModelFavoritesResponse> {
+    return this.http.get<ModelFavoritesResponse>(`${this.apiUrl}/model-favorites`);
+  }
+
+  putModelFavorite(data: ModelFavoritePutPayload): Observable<{ status: string }> {
+    return this.http.put<{ status: string }>(`${this.apiUrl}/model-favorites`, data);
+  }
+
+  deleteModelFavorite(folder: string, filename: string): Observable<{ status: string }> {
+    return this.http.delete<{ status: string }>(
+      `${this.apiUrl}/model-favorites/${encodeURIComponent(folder)}/${encodeURIComponent(filename)}`
+    );
   }
 
   deleteInventoryModel(folder: string, filename: string): Observable<any> {
