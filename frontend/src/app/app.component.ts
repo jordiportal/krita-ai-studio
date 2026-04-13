@@ -70,9 +70,14 @@ import {
     <div class="app-container" [class.has-bottom-nav]="true" *ngIf="appState === 'app'">
       <header class="header">
         <h1>Krita AI</h1>
-        <div class="status" [class.online]="comfyOnline" [class.offline]="!comfyOnline">
-          <span class="status-indicator"></span>
-          <span>{{ comfyOnline ? 'Online' : 'Offline' }}</span>
+        <div class="header-right">
+          <div class="status" [class.online]="comfyOnline" [class.offline]="!comfyOnline">
+            <span class="status-indicator"></span>
+            <span>{{ comfyOnline ? 'Online' : 'Offline' }}</span>
+          </div>
+          <button type="button" class="header-logout-btn" *ngIf="!isAdmin" (click)="handleLogout()">
+            Cerrar sesi&oacute;n
+          </button>
         </div>
       </header>
 
@@ -359,8 +364,56 @@ import {
         </button>
       </ng-container>
 
-      <!-- ============ CONFIG TAB ============ -->
-      <ng-container *ngIf="activeTab === 'config'">
+      <!-- ============ IMÁGENES (CIVITAI) TAB ============ -->
+      <ng-container *ngIf="activeTab === 'images'">
+        <div class="images-filters">
+          <select class="select-field filter-select" [(ngModel)]="imgBrowseSort" (ngModelChange)="handleBrowseImages(true)">
+            <option value="Most Reactions">Populares</option>
+            <option value="Most Comments">Comentadas</option>
+            <option value="Newest">Recientes</option>
+          </select>
+          <select class="select-field filter-select" [(ngModel)]="imgBrowsePeriod" (ngModelChange)="handleBrowseImages(true)">
+            <option value="Day">Hoy</option>
+            <option value="Week">Semana</option>
+            <option value="Month">Mes</option>
+            <option value="Year">A&ntilde;o</option>
+            <option value="AllTime">Siempre</option>
+          </select>
+        </div>
+
+        <div *ngIf="imgBrowseLoading && imgBrowseResults.length === 0" class="gallery-loading"><span class="spinner"></span></div>
+
+        <div class="images-grid" *ngIf="imgBrowseResults.length > 0">
+          <div class="images-grid-item" *ngFor="let img of imgBrowseResults"
+               (click)="handleOpenBrowsedImage(img)" tabindex="0" role="button"
+               aria-label="Ver detalles de generaci&oacute;n">
+            <video *ngIf="img.type === 'video'" [src]="img.url"
+                   muted loop playsinline preload="metadata"
+                   (mouseenter)="handleVideoHover($event, true)"
+                   (mouseleave)="handleVideoHover($event, false)"></video>
+            <img *ngIf="img.type !== 'video'" [src]="getImageThumbUrl(img)" [alt]="img.username" loading="lazy">
+            <div class="video-badge" *ngIf="img.type === 'video'">&#9654; Video</div>
+            <div class="images-grid-overlay">
+              <span class="img-stat" *ngIf="img.stats?.heartCount">&#9829; {{ img.stats.heartCount }}</span>
+              <span class="img-stat" *ngIf="img.stats?.likeCount">&#128077; {{ img.stats.likeCount }}</span>
+              <span class="img-stat" *ngIf="img.stats?.commentCount">&#128172; {{ img.stats.commentCount }}</span>
+            </div>
+            <div class="images-grid-base" *ngIf="img.baseModel">{{ img.baseModel }}</div>
+          </div>
+        </div>
+
+        <div *ngIf="imgBrowseResults.length === 0 && !imgBrowseLoading" class="empty-gallery">
+          <p>Sin im&aacute;genes</p>
+        </div>
+
+        <button *ngIf="imgBrowseHasMore && !imgBrowseLoading"
+                class="btn btn-secondary load-more-btn"
+                (click)="handleBrowseImagesMore()">Cargar m&aacute;s</button>
+        <div *ngIf="imgBrowseLoading && imgBrowseResults.length > 0" class="gallery-loading"><span class="spinner"></span></div>
+      </ng-container>
+
+      <!-- ============ CONFIG TAB (solo administradores) ============ -->
+      <ng-container *ngIf="activeTab === 'config' && isAdmin">
         <div class="card">
           <h2 class="card-title">Conexi&oacute;n ComfyUI</h2>
 
@@ -649,55 +702,15 @@ import {
         </div>
 
         <div class="card" *ngIf="isAdmin">
-          <h2 class="card-title">Usuarios (Microsoft OAuth)</h2>
+          <h2 class="card-title">Herramientas</h2>
           <p class="auth-hint">
-            Las credenciales <strong>Usuario / Contrase&ntilde;a</strong> de arriba son el acceso <strong>local</strong> a la app.
-            Aqu&iacute; gestionas las cuentas que entran con <strong>Continuar con Microsoft</strong> (rol y desactivar).
+            B&uacute;squeda e instalaci&oacute;n en CivitAI, inventario en ComfyUI y cuentas Microsoft (OAuth).
           </p>
-          <div *ngIf="adminUsersLoading" class="gallery-loading"><span class="spinner"></span></div>
-          <div class="admin-users-card" *ngIf="!adminUsersLoading">
-            <div class="admin-user-row" *ngFor="let u of adminUsers">
-              <div class="admin-user-main">
-                <span class="admin-user-email">{{ u.email || u.id }}</span>
-                <span class="admin-user-name" *ngIf="u.display_name">{{ u.display_name }}</span>
-                <span class="admin-user-meta">&Uacute;ltimo acceso: {{ formatUserTime(u.last_login) }}</span>
-              </div>
-              <select class="input-field admin-user-role"
-                      [ngModel]="u.role"
-                      (ngModelChange)="handleAdminUserRoleChange(u, $event)">
-                <option value="user">Usuario</option>
-                <option value="admin">Admin</option>
-              </select>
-              <label class="admin-user-dsl">
-                <input type="checkbox" [checked]="u.disabled === 1"
-                       (change)="handleAdminUserDisabledChange(u, $any($event.target).checked)" />
-                Desactivado
-              </label>
-            </div>
-            <div *ngIf="adminUsers.length === 0" class="empty-gallery">
-              <p>A&uacute;n no hay usuarios con Microsoft; aparecer&aacute;n al iniciar sesi&oacute;n.</p>
-            </div>
+          <div class="sub-tabs">
+            <button type="button" class="sub-tab" [class.active]="modelsView === 'search'" (click)="modelsView = 'search'">Modelos CivitAI</button>
+            <button type="button" class="sub-tab" [class.active]="modelsView === 'inventory'" (click)="modelsView = 'inventory'; loadInventory()">Inventario</button>
+            <button type="button" class="sub-tab" [class.active]="modelsView === 'users'" (click)="modelsView = 'users'; loadAdminUsers()">Usuarios</button>
           </div>
-          <button type="button" class="btn btn-secondary" style="width:100%;margin-top:8px;"
-                  (click)="loadAdminUsers()">
-            Actualizar lista
-          </button>
-        </div>
-      </ng-container>
-
-      <!-- ============ MODELS TAB ============ -->
-      <ng-container *ngIf="activeTab === 'models'">
-        <div class="sub-tabs">
-          <button class="sub-tab" [class.active]="modelsView === 'search'" (click)="modelsView = 'search'">Modelos</button>
-          <button class="sub-tab" [class.active]="modelsView === 'images'" (click)="modelsView = 'images'; handleBrowseImages()">Im&aacute;genes</button>
-          <button class="sub-tab" [class.active]="modelsView === 'inventory'" (click)="modelsView = 'inventory'; loadInventory()">
-            Inventario
-          </button>
-          <button class="sub-tab" *ngIf="isAdmin" [class.active]="modelsView === 'users'"
-                  (click)="modelsView = 'users'; loadAdminUsers()">
-            Usuarios
-          </button>
-        </div>
 
         <!-- SEARCH -->
         <ng-container *ngIf="modelsView === 'search'">
@@ -751,54 +764,6 @@ import {
 
           <button *ngIf="civitaiHasMore && !civitaiSearching" class="btn btn-secondary load-more-btn"
                   (click)="handleCivitaiLoadMore()">Cargar m&aacute;s</button>
-        </ng-container>
-
-        <!-- IMAGES BROWSER -->
-        <ng-container *ngIf="modelsView === 'images'">
-          <div class="images-filters">
-            <select class="select-field filter-select" [(ngModel)]="imgBrowseSort" (ngModelChange)="handleBrowseImages(true)">
-              <option value="Most Reactions">Populares</option>
-              <option value="Most Comments">Comentadas</option>
-              <option value="Newest">Recientes</option>
-            </select>
-            <select class="select-field filter-select" [(ngModel)]="imgBrowsePeriod" (ngModelChange)="handleBrowseImages(true)">
-              <option value="Day">Hoy</option>
-              <option value="Week">Semana</option>
-              <option value="Month">Mes</option>
-              <option value="Year">A&ntilde;o</option>
-              <option value="AllTime">Siempre</option>
-            </select>
-          </div>
-
-          <div *ngIf="imgBrowseLoading && imgBrowseResults.length === 0" class="gallery-loading"><span class="spinner"></span></div>
-
-          <div class="images-grid" *ngIf="imgBrowseResults.length > 0">
-            <div class="images-grid-item" *ngFor="let img of imgBrowseResults"
-                 (click)="handleOpenBrowsedImage(img)" tabindex="0" role="button"
-                 aria-label="Ver detalles de generaci&oacute;n">
-              <video *ngIf="img.type === 'video'" [src]="img.url"
-                     muted loop playsinline preload="metadata"
-                     (mouseenter)="handleVideoHover($event, true)"
-                     (mouseleave)="handleVideoHover($event, false)"></video>
-              <img *ngIf="img.type !== 'video'" [src]="getImageThumbUrl(img)" [alt]="img.username" loading="lazy">
-              <div class="video-badge" *ngIf="img.type === 'video'">&#9654; Video</div>
-              <div class="images-grid-overlay">
-                <span class="img-stat" *ngIf="img.stats?.heartCount">&#9829; {{ img.stats.heartCount }}</span>
-                <span class="img-stat" *ngIf="img.stats?.likeCount">&#128077; {{ img.stats.likeCount }}</span>
-                <span class="img-stat" *ngIf="img.stats?.commentCount">&#128172; {{ img.stats.commentCount }}</span>
-              </div>
-              <div class="images-grid-base" *ngIf="img.baseModel">{{ img.baseModel }}</div>
-            </div>
-          </div>
-
-          <div *ngIf="imgBrowseResults.length === 0 && !imgBrowseLoading" class="empty-gallery">
-            <p>Sin im&aacute;genes</p>
-          </div>
-
-          <button *ngIf="imgBrowseHasMore && !imgBrowseLoading"
-                  class="btn btn-secondary load-more-btn"
-                  (click)="handleBrowseImagesMore()">Cargar m&aacute;s</button>
-          <div *ngIf="imgBrowseLoading && imgBrowseResults.length > 0" class="gallery-loading"><span class="spinner"></span></div>
         </ng-container>
 
         <!-- INVENTORY -->
@@ -927,7 +892,16 @@ import {
           </div>
         </ng-container>
 
-        <!-- MODEL OVERRIDE MODAL -->
+          <button type="button" class="btn btn-secondary" style="width:100%;margin-top:8px;"
+                  *ngIf="modelsView === 'users'"
+                  (click)="loadAdminUsers()">
+            Actualizar lista
+          </button>
+        </div>
+
+      </ng-container>
+
+      <!-- MODEL OVERRIDE MODAL (global: puede abrirse desde Ajustes aunque cambies de pestaña) -->
         <div class="override-overlay" *ngIf="overrideModalOpen" (click)="overrideModalOpen = false">
           <div class="override-dialog" (click)="$event.stopPropagation()">
             <div class="override-header">
@@ -1069,8 +1043,6 @@ import {
             </ng-container>
           </div>
         </div>
-
-      </ng-container>
 
       <!-- ============ FULLSCREEN VIEWER ============ -->
       <div
@@ -1249,13 +1221,14 @@ import {
         </button>
         <button
           class="nav-item"
-          [class.active]="activeTab === 'models'"
-          (click)="handleSwitchTab('models')"
-          aria-label="Modelos">
-          <span class="nav-icon">&#128230;</span>
-          <span class="nav-label">Modelos</span>
+          [class.active]="activeTab === 'images'"
+          (click)="handleSwitchTab('images')"
+          aria-label="Im\u00e1genes CivitAI">
+          <span class="nav-icon">&#128444;</span>
+          <span class="nav-label">Im&aacute;genes</span>
         </button>
         <button
+          *ngIf="isAdmin"
           class="nav-item"
           [class.active]="activeTab === 'config'"
           (click)="handleSwitchTab('config')"
@@ -1370,11 +1343,18 @@ import {
     .admin-user-meta { font-size: 11px; color: var(--text-secondary); }
     .admin-user-role { width: 110px; padding: 6px 8px; font-size: 12px; }
     .admin-user-dsl { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); cursor: pointer; }
+    .header-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
+    .header-logout-btn {
+      padding: 6px 12px; font-size: 12px; font-weight: 500; border-radius: 8px;
+      border: 1px solid var(--border); background: var(--bg-input); color: var(--text-secondary);
+      cursor: pointer; font-family: inherit;
+    }
+    .header-logout-btn:hover { color: var(--text-primary); border-color: var(--text-secondary); }
   `]
 })
 export class AppComponent implements OnInit, OnDestroy {
   appState: 'loading' | 'login' | 'app' = 'loading';
-  activeTab: 'generate' | 'gallery' | 'config' | 'models' = 'generate';
+  activeTab: 'generate' | 'gallery' | 'config' | 'images' = 'generate';
   comfyOnline = false;
 
   loginUsername = '';
@@ -1389,7 +1369,7 @@ export class AppComponent implements OnInit, OnDestroy {
   adminUsers: AppUserRow[] = [];
   adminUsersLoading = false;
 
-  modelsView: 'search' | 'images' | 'cache' | 'inventory' | 'users' = 'search';
+  modelsView: 'search' | 'cache' | 'inventory' | 'users' = 'search';
   civitaiQuery = '';
   civitaiType = '';
   civitaiSort = 'Most Downloaded';
@@ -1597,6 +1577,9 @@ export class AppComponent implements OnInit, OnDestroy {
     this.oauthAvailable = !!status.oauth_available;
     this.legacyLogin = !!status.legacy_login;
     this.isAdmin = !!status.is_admin;
+    if (!this.isAdmin && this.activeTab === 'config') {
+      this.activeTab = 'generate';
+    }
   }
 
   mapLoginError(code: string): string {
@@ -1727,9 +1710,10 @@ export class AppComponent implements OnInit, OnDestroy {
     if (e.key === 'ArrowRight') this.handleViewerNext(e);
   }
 
-  handleSwitchTab(tab: 'generate' | 'gallery' | 'config' | 'models') {
+  handleSwitchTab(tab: 'generate' | 'gallery' | 'config' | 'images') {
     this.activeTab = tab;
     if (tab === 'gallery') this.loadGallery();
+    if (tab === 'images') this.handleBrowseImages();
     if (tab === 'config' && this.isAdmin) {
       this.loadAdminUsers();
     }

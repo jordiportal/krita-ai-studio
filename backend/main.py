@@ -17,7 +17,7 @@ import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, Depends
@@ -186,6 +186,10 @@ def init_db():
         pass
     try:
         conn.execute("ALTER TABLE gallery ADD COLUMN fps REAL NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE gallery ADD COLUMN owner_user_id TEXT")
     except sqlite3.OperationalError:
         pass
 
@@ -547,6 +551,7 @@ def save_gallery_image(
     checkpoint: str, width: int, height: int,
     seed: int = 0, sampler: str = "", scheduler: str = "",
     steps: int = 0, cfg: float = 0.0, strength: float = 0.0,
+    owner_user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     img_id = uuid.uuid4().hex[:12]
     filename = f"{img_id}.png"
@@ -557,10 +562,10 @@ def save_gallery_image(
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute(
         "INSERT INTO gallery (id, prompt, neg_prompt, checkpoint, width, height, filename, created_at, "
-        "seed, sampler, scheduler, steps, cfg, strength) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "seed, sampler, scheduler, steps, cfg, strength, owner_user_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (img_id, prompt, neg_prompt, checkpoint, width, height, filename, now,
-         seed, sampler, scheduler, steps, cfg, strength),
+         seed, sampler, scheduler, steps, cfg, strength, owner_user_id),
     )
     conn.commit()
     conn.close()
@@ -577,6 +582,7 @@ def save_gallery_video(
     checkpoint: str, width: int, height: int,
     seed: int = 0, sampler: str = "", scheduler: str = "",
     steps: int = 0, cfg: float = 0.0, length: int = 0, fps: float = 0.0,
+    owner_user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     vid_id = uuid.uuid4().hex[:12]
     if len(video_bytes) >= 4 and video_bytes[:4] == b"RIFF":
@@ -595,10 +601,10 @@ def save_gallery_video(
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute(
         "INSERT INTO gallery (id, prompt, neg_prompt, checkpoint, width, height, filename, created_at, "
-        "seed, sampler, scheduler, steps, cfg, strength, type, length, fps) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'video', ?, ?)",
+        "seed, sampler, scheduler, steps, cfg, strength, type, length, fps, owner_user_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'video', ?, ?, ?)",
         (vid_id, prompt, neg_prompt, checkpoint, width, height, filename, now,
-         seed, sampler, scheduler, steps, cfg, length, fps),
+         seed, sampler, scheduler, steps, cfg, length, fps, owner_user_id),
     )
     conn.commit()
     conn.close()
@@ -609,22 +615,111 @@ def save_gallery_video(
     }
 
 
-def list_gallery(limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+def list_gallery(
+    limit: int = 50, offset: int = 0, owner_user_id: Optional[str] = None
+) -> List[Dict[str, Any]]:
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT * FROM gallery ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        (limit, offset),
-    ).fetchall()
+    if owner_user_id is None:
+        rows = conn.execute(
+            "SELECT * FROM gallery ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM gallery WHERE owner_user_id = ? "
+            "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (owner_user_id, limit, offset),
+        ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-def count_gallery() -> int:
+def count_gallery(owner_user_id: Optional[str] = None) -> int:
     conn = sqlite3.connect(str(DB_PATH))
-    count = conn.execute("SELECT COUNT(*) FROM gallery").fetchone()[0]
+    if owner_user_id is None:
+        count = conn.execute("SELECT COUNT(*) FROM gallery").fetchone()[0]
+    else:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM gallery WHERE owner_user_id = ?",
+            (owner_user_id,),
+        ).fetchone()[0]
     conn.close()
-    return count
+    return int(count)
+
+
+def gallery_row_owner(img_id: str) -> Optional[str]:
+    conn = sqlite3.connect(str(DB_PATH))
+    row = conn.execute(
+        "SELECT owner_user_id FROM gallery WHERE id = ?", (img_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return row[0]
+
+
+def _gallery_owner_key_from_request(request: Request) -> Tuple[bool, Optional[str]]:
+    """(is_admin, owner_filter). owner_filter None => ver todas las filas."""
+    cfg = get_comfyui_config()
+    if not app_auth_enabled(cfg):
+        return True, None
+    token = extract_token_from_request(request)
+    payload = verify_token(token) if token else None
+    if not payload or not token_payload_allowed(payload, cfg):
+        return False, None
+    if is_admin_payload(payload, cfg):
+        return True, None
+    typ = payload.get("typ")
+    if typ == "oauth":
+        return False, str(payload.get("sub") or "") or None
+    u = cfg.get("auth_user", "")
+    if typ == "legacy" or (not typ and payload.get("sub") == u):
+        return False, (f"legacy:{u}" if u else None)
+    return False, None
+
+
+def _gallery_require_item_access(request: Request, img_id: str) -> None:
+    cfg = get_comfyui_config()
+    if not app_auth_enabled(cfg):
+        return
+    row_owner = gallery_row_owner(img_id)
+    if row_owner is None:
+        return
+    is_admin, _ = _gallery_owner_key_from_request(request)
+    if is_admin:
+        return
+    token = extract_token_from_request(request)
+    payload = verify_token(token) if token else None
+    if not payload or not token_payload_allowed(payload, cfg):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    typ = payload.get("typ")
+    uid: Optional[str] = None
+    if typ == "oauth":
+        uid = str(payload.get("sub") or "")
+    else:
+        u = cfg.get("auth_user", "")
+        if typ == "legacy" or (not typ and payload.get("sub") == u):
+            uid = f"legacy:{u}" if u else None
+    if not uid or row_owner != uid:
+        raise HTTPException(status_code=403, detail="Gallery item not allowed")
+
+
+def _job_owner_user_id(request: Request) -> Optional[str]:
+    cfg = get_comfyui_config()
+    if not app_auth_enabled(cfg):
+        return None
+    token = extract_token_from_request(request)
+    payload = verify_token(token) if token else None
+    if not payload or not token_payload_allowed(payload, cfg):
+        return None
+    typ = payload.get("typ")
+    if typ == "oauth":
+        return str(payload.get("sub") or "") or None
+    u = cfg.get("auth_user", "")
+    if typ == "legacy" or (not typ and payload.get("sub") == u):
+        return f"legacy:{u}" if u else None
+    return None
 
 
 def delete_gallery_image(img_id: str) -> bool:
@@ -1322,14 +1417,22 @@ async def api_save_settings(payload: SettingsPayload):
 # ─── Gallery endpoints ───────────────────────────────────────────────────────
 
 @app.get("/api/gallery")
-async def api_list_gallery(limit: int = 50, offset: int = 0):
-    items = list_gallery(limit, offset)
-    total = count_gallery()
+async def api_list_gallery(request: Request, limit: int = 50, offset: int = 0):
+    is_admin, owner_key = _gallery_owner_key_from_request(request)
+    if app_auth_enabled(get_comfyui_config()) and not is_admin and owner_key is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if is_admin:
+        items = list_gallery(limit, offset, owner_user_id=None)
+        total = count_gallery(owner_user_id=None)
+    else:
+        items = list_gallery(limit, offset, owner_user_id=owner_key)
+        total = count_gallery(owner_user_id=owner_key)
     return {"items": items, "total": total}
 
 
 @app.get("/api/gallery/{img_id}/image")
-async def api_gallery_image(img_id: str):
+async def api_gallery_image(img_id: str, request: Request):
+    _gallery_require_item_access(request, img_id)
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT filename, type FROM gallery WHERE id = ?", (img_id,)).fetchone()
@@ -1349,15 +1452,17 @@ async def api_gallery_image(img_id: str):
 
 
 @app.delete("/api/gallery/{img_id}")
-async def api_delete_gallery(img_id: str):
+async def api_delete_gallery(img_id: str, request: Request):
+    _gallery_require_item_access(request, img_id)
     if delete_gallery_image(img_id):
         return {"status": "ok"}
     raise HTTPException(status_code=404, detail="Image not found")
 
 
 @app.get("/api/gallery/{img_id}/meta")
-async def api_gallery_image_meta(img_id: str):
+async def api_gallery_image_meta(img_id: str, request: Request):
     """Get full generation metadata for a gallery image."""
+    _gallery_require_item_access(request, img_id)
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     row = conn.execute(
@@ -2015,15 +2120,15 @@ async def get_samplers():
 # ─── Generation ───────────────────────────────────────────────────────────────
 
 @app.post("/api/generate/txt2img", response_model=GenerationResponse)
-async def txt2img(request: GenerationRequest):
+async def txt2img(http_request: Request, body: GenerationRequest):
     comfy_url = get_comfyui_url()
     cfg = get_comfyui_config()
     try:
-        actual_seed = request.seed
+        actual_seed = body.seed
         if actual_seed < 0:
             actual_seed = random.randint(0, 2**32 - 1)
 
-        clean_prompt, lora_tags = parse_lora_tags(request.prompt)
+        clean_prompt, lora_tags = parse_lora_tags(body.prompt)
         resolved_loras = None
         if lora_tags:
             available_loras = []
@@ -2066,29 +2171,29 @@ async def txt2img(request: GenerationRequest):
                     missing_loras=candidates_list,
                 )
 
-        prompt_text = clean_prompt if lora_tags else request.prompt
+        prompt_text = clean_prompt if lora_tags else body.prompt
         prompt_text = await _maybe_apply_llm_prompt_filter(cfg, prompt_text)
-        model_name = request.checkpoint or "SDXL.safetensors"
+        model_name = body.checkpoint or "SDXL.safetensors"
 
         arch_mgr = get_arch_manager()
         arch_config = arch_mgr.resolve(model_name)
         arch_id = arch_config.get("_arch_id", "sd15")
 
         print(f"[txt2img] model={model_name}, arch={arch_id}, loader={arch_config.get('loader')}")
-        print(f"[txt2img] size={request.width}x{request.height}, steps={request.steps}, cfg={request.cfg_scale}, sampler={request.sampler}")
+        print(f"[txt2img] size={body.width}x{body.height}, steps={body.steps}, cfg={body.cfg_scale}, sampler={body.sampler}")
 
         workflow = build_txt2img_workflow(
             arch_config=arch_config,
             prompt=prompt_text,
-            negative_prompt=request.negative_prompt or "",
+            negative_prompt=body.negative_prompt or "",
             model_name=model_name,
-            sampler=request.sampler or "",
-            scheduler=request.scheduler or "",
-            steps=request.steps,
-            cfg=request.cfg_scale,
+            sampler=body.sampler or "",
+            scheduler=body.scheduler or "",
+            steps=body.steps,
+            cfg=body.cfg_scale,
             seed=actual_seed,
-            width=request.width,
-            height=request.height,
+            width=body.width,
+            height=body.height,
             batch_size=1,
             loras=resolved_loras if resolved_loras else None,
         )
@@ -2108,18 +2213,20 @@ async def txt2img(request: GenerationRequest):
             result = response.json()
             prompt_id = result.get("prompt_id")
 
+            owner_uid = _job_owner_user_id(http_request)
             _job_meta[prompt_id] = {
                 "prompt": prompt_text,
-                "neg_prompt": request.negative_prompt or "",
-                "checkpoint": request.checkpoint or "",
-                "width": request.width,
-                "height": request.height,
+                "neg_prompt": body.negative_prompt or "",
+                "checkpoint": body.checkpoint or "",
+                "width": body.width,
+                "height": body.height,
                 "seed": actual_seed,
-                "sampler": request.sampler or "",
-                "scheduler": request.scheduler or "",
-                "steps": request.steps or 0,
-                "cfg": request.cfg_scale or 0.0,
-                "strength": request.strength or 0.0,
+                "sampler": body.sampler or "",
+                "scheduler": body.scheduler or "",
+                "steps": body.steps or 0,
+                "cfg": body.cfg_scale or 0.0,
+                "strength": body.strength or 0.0,
+                "owner_user_id": owner_uid,
             }
 
             return GenerationResponse(job_id=prompt_id, status="queued", images=None)
@@ -2288,6 +2395,7 @@ async def get_job_status(job_id: str):
                                             cfg=meta.get("cfg", 0.0),
                                             length=meta.get("length", 0),
                                             fps=meta.get("fps", 0.0),
+                                            owner_user_id=meta.get("owner_user_id"),
                                         )
                                         gallery_video_ids.append(entry["id"])
                                     else:
@@ -2324,6 +2432,7 @@ async def get_job_status(job_id: str):
                                     steps=meta.get("steps", 0),
                                     cfg=meta.get("cfg", 0.0),
                                     strength=meta.get("strength", 0.0),
+                                    owner_user_id=meta.get("owner_user_id"),
                                 )
                                 gallery_ids.append(entry["id"])
                             print(f"Saved {len(gallery_ids)} images to gallery")
@@ -2385,12 +2494,12 @@ async def proxy_video(video_id: str):
 
 
 @app.post("/api/generate/txt2video", response_model=GenerationResponse)
-async def txt2video(request: GenerationVideoRequest):
+async def txt2video(http_request: Request, body: GenerationVideoRequest):
     """Genera video usando Wan 2.x T2V via workflow con soporte LoRA."""
     comfy_url = get_comfyui_url()
     cfg = get_comfyui_config()
     try:
-        actual_seed = request.seed
+        actual_seed = body.seed
         if actual_seed < 0:
             actual_seed = random.randint(0, 2**32 - 1)
 
@@ -2412,11 +2521,11 @@ async def txt2video(request: GenerationVideoRequest):
         except Exception:
             pass
 
-        req_checkpoint = request.checkpoint or ""
+        req_checkpoint = body.checkpoint or ""
         video_checkpoint = req_checkpoint if req_checkpoint in available_unets else VIDEO_UNET_DEFAULT
 
         # Parse LoRA tags from prompt
-        clean_prompt, lora_tags = parse_lora_tags(request.prompt)
+        clean_prompt, lora_tags = parse_lora_tags(body.prompt)
         resolved_loras = None
         if lora_tags:
             resolved_loras = []
@@ -2446,7 +2555,7 @@ async def txt2video(request: GenerationVideoRequest):
                     missing_loras=candidates_list,
                 )
 
-        prompt_text = clean_prompt if lora_tags else request.prompt
+        prompt_text = clean_prompt if lora_tags else body.prompt
         prompt_text = await _maybe_apply_llm_prompt_filter(cfg, prompt_text)
 
         arch_mgr = get_arch_manager()
@@ -2461,26 +2570,26 @@ async def txt2video(request: GenerationVideoRequest):
         workflow = build_txt2video_workflow(
             arch_config=video_arch_config,
             prompt=prompt_text,
-            negative_prompt=request.negative_prompt or "",
+            negative_prompt=body.negative_prompt or "",
             model_name=video_checkpoint,
             low_noise_model=low_unet,
-            vae_override=request.vae or "",
-            clip_override=request.clip or "",
-            sampler=request.sampler or "",
-            scheduler=request.scheduler or "",
-            steps=request.steps or 20,
-            cfg=request.cfg_scale,
+            vae_override=body.vae or "",
+            clip_override=body.clip or "",
+            sampler=body.sampler or "",
+            scheduler=body.scheduler or "",
+            steps=body.steps or 20,
+            cfg=body.cfg_scale,
             seed=actual_seed,
-            width=request.width,
-            height=request.height,
-            length=request.length,
-            fps=request.fps,
+            width=body.width,
+            height=body.height,
+            length=body.length,
+            fps=body.fps,
             batch_size=1,
             loras=resolved_loras,
         )
         print(
             f"[txt2video] arch={video_arch_config.get('_arch_id')}, unet={video_checkpoint}, "
-            f"dual={low_unet is not None}, low={low_unet or '-'}, seed={actual_seed}, length={request.length}, loras={len(resolved_loras or [])}"
+            f"dual={low_unet is not None}, low={low_unet or '-'}, seed={actual_seed}, length={body.length}, loras={len(resolved_loras or [])}"
         )
 
         async with httpx.AsyncClient() as client:
@@ -2498,20 +2607,22 @@ async def txt2video(request: GenerationVideoRequest):
             result = response.json()
             prompt_id = result.get("prompt_id")
 
+            owner_uid = _job_owner_user_id(http_request)
             _job_meta[prompt_id] = {
                 "prompt": prompt_text,
-                "neg_prompt": request.negative_prompt or "",
+                "neg_prompt": body.negative_prompt or "",
                 "checkpoint": video_checkpoint,
-                "width": request.width,
-                "height": request.height,
-                "length": request.length,
-                "fps": request.fps,
+                "width": body.width,
+                "height": body.height,
+                "length": body.length,
+                "fps": body.fps,
                 "seed": actual_seed,
-                "sampler": request.sampler or "",
-                "scheduler": request.scheduler or "",
-                "steps": request.steps or 0,
-                "cfg": request.cfg_scale or 0.0,
+                "sampler": body.sampler or "",
+                "scheduler": body.scheduler or "",
+                "steps": body.steps or 0,
+                "cfg": body.cfg_scale or 0.0,
                 "is_video": True,
+                "owner_user_id": owner_uid,
             }
 
             return GenerationResponse(job_id=prompt_id, status="queued", images=None)
