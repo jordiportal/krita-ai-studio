@@ -530,7 +530,13 @@ def attach_auth_cookie(response: JSONResponse | RedirectResponse, token: str) ->
 
 
 def clear_auth_cookie(response: JSONResponse | RedirectResponse) -> None:
-    response.delete_cookie(JWT_COOKIE_NAME, path="/")
+    response.delete_cookie(
+        key=JWT_COOKIE_NAME,
+        httponly=True,
+        samesite="lax",
+        secure=cookie_secure(),
+        path="/",
+    )
 
 
 def extract_token_from_request(request: Request) -> Optional[str]:
@@ -957,6 +963,9 @@ async def auth_status(request: Request):
         "role": None,
         "is_admin": False,
     }
+    if not enabled:
+        out["is_admin"] = True
+        out["role"] = "admin"
     if valid and payload:
         if payload.get("typ") == "oauth":
             out["username"] = payload.get("email") or payload.get("sub")

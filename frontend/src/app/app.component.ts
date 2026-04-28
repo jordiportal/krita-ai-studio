@@ -75,7 +75,7 @@ import {
             <span class="status-indicator"></span>
             <span>{{ comfyOnline ? 'Online' : 'Offline' }}</span>
           </div>
-          <button type="button" class="header-logout-btn" *ngIf="!isAdmin" (click)="handleLogout()">
+          <button type="button" class="header-logout-btn" *ngIf="isAuthEnabled" (click)="handleLogout()">
             Cerrar sesi&oacute;n
           </button>
         </div>
@@ -412,8 +412,8 @@ import {
         <div *ngIf="imgBrowseLoading && imgBrowseResults.length > 0" class="gallery-loading"><span class="spinner"></span></div>
       </ng-container>
 
-      <!-- ============ CONFIG TAB (solo administradores) ============ -->
-      <ng-container *ngIf="activeTab === 'config' && isAdmin">
+      <!-- ============ CONFIG TAB ============ -->
+      <ng-container *ngIf="activeTab === 'config' && (isAdmin || !isAuthEnabled)">
         <div class="card">
           <h2 class="card-title">Conexi&oacute;n ComfyUI</h2>
 
@@ -701,7 +701,7 @@ import {
           </div>
         </div>
 
-        <div class="card" *ngIf="isAdmin">
+        <div class="card" *ngIf="isAdmin || !isAuthEnabled">
           <h2 class="card-title">Herramientas</h2>
           <p class="auth-hint">
             B&uacute;squeda e instalaci&oacute;n en CivitAI, inventario en ComfyUI y cuentas Microsoft (OAuth).
@@ -1228,7 +1228,7 @@ import {
           <span class="nav-label">Im&aacute;genes</span>
         </button>
         <button
-          *ngIf="isAdmin"
+          *ngIf="isAdmin || !isAuthEnabled"
           class="nav-item"
           [class.active]="activeTab === 'config'"
           (click)="handleSwitchTab('config')"
