@@ -8,6 +8,7 @@ import {
   Model, GenerationRequest, GenerationVideoRequest, Settings, ComfyConfig,
   ConnectionTestResult, LlmTestResult, GalleryItem, CachedModel, ModelTypeOption,
   InventoryCategory, InventoryItem, Architecture, VideoModel, ModelFavoriteEntry, AppUserRow,
+  ComfyWorkflowFile,
   MissingLoraResult, MissingLoraCandidate, AuthStatus,
 } from './types';
 
@@ -170,9 +171,18 @@ import {
             <label>Modelo de v&iacute;deo</label>
             <select class="input-field" [(ngModel)]="selectedVideoModel">
               <option value="">Auto (Wan 2.2 14B)</option>
-              <option *ngFor="let vm of videoModels" [value]="vm.filename">
-                {{ vm.filename }} ({{ vm.architecture_label }})
-              </option>
+              <option *ngIf="xditAvailable" value="__xdit__">&#9889; xDiT (r&aacute;pido, multi-GPU)</option>
+              <optgroup *ngIf="favoriteVideoWorkflowPickList().length > 0" label="Workflows (favoritos)">
+                <option *ngFor="let w of favoriteVideoWorkflowPickList()" [value]="w.filename">{{ w.display }}</option>
+              </optgroup>
+              <optgroup *ngIf="videoWorkflowFilesNotFavorite().length > 0" label="Workflows ComfyUI">
+                <option *ngFor="let wf of videoWorkflowFilesNotFavorite()" [value]="wf.filename">{{ wf.filename }}</option>
+              </optgroup>
+              <optgroup label="UNet / modelos Wan" *ngIf="videoModels.length > 0">
+                <option *ngFor="let vm of videoModels" [value]="vm.filename">
+                  {{ vm.filename }} ({{ vm.architecture_label }})
+                </option>
+              </optgroup>
             </select>
           </div>
 
@@ -218,7 +228,7 @@ import {
           <button
             class="btn btn-primary"
             (click)="handleGenerate()"
-            [disabled]="generating || !comfyOnline">
+            [disabled]="generating || (!comfyOnline && selectedVideoModel !== '__xdit__')">
             <span *ngIf="generating" class="spinner"></span>
             <span>{{ generating ? ('Generando... ' + (generationProgress > 0 ? generationProgress + '%' : '')) : (generationMode === 'video' ? 'Generar Video' : 'Generar Imagen') }}</span>
           </button>
@@ -250,6 +260,10 @@ import {
                 </optgroup>
                 <optgroup label="Diffusion Models" *ngIf="getModelsByType('diffusion_model').length > 0">
                   <option *ngFor="let model of getModelsByType('diffusion_model')" [value]="model.name">{{ model.name }}</option>
+                </optgroup>
+                <optgroup label="Workflows ComfyUI (userdata/workflows)">
+                  <option *ngFor="let wf of comfyWorkflowFiles" [value]="wf.filename">{{ wf.filename }}</option>
+                  <option *ngIf="comfyWorkflowFiles.length === 0" disabled value="__none__">(Sin JSON listados; guarda workflows en Comfy: usuario &rarr; workflows)</option>
                 </optgroup>
                 <option *ngIf="models.length === 0" value="">Cargando...</option>
               </select>
@@ -342,7 +356,12 @@ import {
             tabindex="0"
             role="button"
             [attr.aria-label]="item.prompt || 'Imagen ' + (i + 1)">
-            <img
+            <video *ngIf="item.type === 'video'"
+              [src]="getImageUrl(item.id)"
+              muted loop playsinline preload="metadata"
+              (mouseenter)="handleVideoHover($event, true)"
+              (mouseleave)="handleVideoHover($event, false)"></video>
+            <img *ngIf="item.type !== 'video'"
               [src]="getImageUrl(item.id)"
               [alt]="item.prompt"
               loading="lazy">
@@ -447,6 +466,20 @@ import {
 
           <div class="config-url-preview">
             {{ configSecure === 'true' ? 'https' : 'http' }}://{{ configHost || '...' }}:{{ configPort || '...' }}
+          </div>
+
+          <h2 class="card-title" style="margin-top: 16px;">xDiT (Video multi-GPU)</h2>
+
+          <div class="input-group">
+            <label>URL del servicio xDiT</label>
+            <input
+              class="input-field"
+              type="text"
+              [(ngModel)]="configXditUrl"
+              placeholder="http://192.168.7.101:6000">
+          </div>
+          <div class="config-url-preview" *ngIf="configXditUrl">
+            {{ xditAvailable ? '&#9989; xDiT Online' : '&#10060; xDiT Offline' }}
           </div>
 
           <h2 class="card-title" style="margin-top: 8px;">Autenticaci&oacute;n</h2>
@@ -845,11 +878,12 @@ import {
                              placeholder="Nombre corto en el desplegable" />
                     </div>
                   </div>
-                  <button class="cache-delete-btn" (click)="handleDeleteInventoryItem(item, $event)"
+                  <button *ngIf="item.folder !== 'workflows'" class="cache-delete-btn" (click)="handleDeleteInventoryItem(item, $event)"
                           aria-label="Eliminar modelo" title="Eliminar de ComfyUI">&#128465;</button>
                 </div>
                 <div class="inv-empty" *ngIf="getFilteredItems(cat).length === 0">
-                  Sin resultados para el filtro
+                  <ng-container *ngIf="cat.items.length > 0">Sin resultados para el filtro</ng-container>
+                  <ng-container *ngIf="cat.items.length === 0">No hay archivos en esta categor&iacute;a.</ng-container>
                 </div>
               </div>
             </div>
@@ -1072,7 +1106,12 @@ import {
             (click)="handleViewerPrev($event)"
             aria-label="Anterior">&#8249;</button>
 
-          <img
+          <video *ngIf="viewerItems[viewerIndex]?.type === 'video'"
+            class="viewer-img"
+            [src]="viewerImageSrc"
+            controls autoplay loop muted playsinline
+            (click)="$event.stopPropagation()"></video>
+          <img *ngIf="viewerItems[viewerIndex]?.type !== 'video'"
             class="viewer-img"
             [src]="viewerImageSrc"
             [alt]="viewerItems[viewerIndex]?.prompt || ''"
@@ -1467,6 +1506,8 @@ export class AppComponent implements OnInit, OnDestroy {
   videoFps = 8.0;
   videoModels: import('./types').VideoModel[] = [];
   selectedVideoModel = '';
+  /** Workflows API listados desde Comfy (GET /api/workflows) */
+  comfyWorkflowFiles: ComfyWorkflowFile[] = [];
   videoResolutionPreset = '832x480';
   /** Coincide con un preset si width/height son exactamente 832x480, etc. */
   imageResolutionPreset = '';
@@ -1475,6 +1516,8 @@ export class AppComponent implements OnInit, OnDestroy {
   configHost = '';
   configPort = '8188';
   configSecure = 'false';
+  configXditUrl = '';
+  xditAvailable = false;
   authUser = '';
   authPass = '';
   civitaiApiKey = '';
@@ -1562,6 +1605,7 @@ export class AppComponent implements OnInit, OnDestroy {
             this.loadAdminUsers();
           }
         } else {
+          this.resetCivitaiBrowsingState();
           this.appState = 'login';
         }
       },
@@ -1577,9 +1621,19 @@ export class AppComponent implements OnInit, OnDestroy {
     this.oauthAvailable = !!status.oauth_available;
     this.legacyLogin = !!status.legacy_login;
     this.isAdmin = !!status.is_admin;
+    if (status.logged_in && status.email) {
+      this.authService.clearStoredToken();
+    }
     if (!this.isAdmin && this.activeTab === 'config') {
       this.activeTab = 'generate';
     }
+  }
+
+  private resetCivitaiBrowsingState() {
+    this.imgBrowseLoaded = false;
+    this.imgBrowseResults = [];
+    this.imgBrowseCursor = '';
+    this.imgBrowseHasMore = false;
   }
 
   mapLoginError(code: string): string {
@@ -1660,6 +1714,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.loadGallery();
     this.loadVideoModels();
     this.loadModelFavorites();
+    this.loadComfyWorkflows();
     this.healthInterval = setInterval(() => this.checkHealth(), 30000);
   }
 
@@ -1713,7 +1768,7 @@ export class AppComponent implements OnInit, OnDestroy {
   handleSwitchTab(tab: 'generate' | 'gallery' | 'config' | 'images') {
     this.activeTab = tab;
     if (tab === 'gallery') this.loadGallery();
-    if (tab === 'images') this.handleBrowseImages();
+    if (tab === 'images') this.handleBrowseImages(true);
     if (tab === 'config' && this.isAdmin) {
       this.loadAdminUsers();
     }
@@ -1759,6 +1814,15 @@ export class AppComponent implements OnInit, OnDestroy {
           this.llmFilterCanToggle = !!lf.can_toggle;
           this.llmContentFilterUserEnabled = lf.mandatory ? true : !!lf.user_enabled;
         }
+        this.configXditUrl = cfg.xdit_url || '';
+        if (this.configXditUrl) {
+          this.generationService.getXditHealth().subscribe({
+            next: (h: any) => { this.xditAvailable = h.status === 'ok'; },
+            error: () => { this.xditAvailable = false; },
+          });
+        } else {
+          this.xditAvailable = false;
+        }
       },
       error: () => {}
     });
@@ -1776,6 +1840,7 @@ export class AppComponent implements OnInit, OnDestroy {
           type: 'diffusion_model',
         }));
         this.models = [...checkpoints, ...diffusionModels];
+        this.mergeWorkflowModelsIntoModels();
         if (!this.selectedModel && this.models.length > 0) {
           this.selectedModel = this.models[0].name;
         }
@@ -1787,6 +1852,28 @@ export class AppComponent implements OnInit, OnDestroy {
         }
       },
       error: () => {}
+    });
+  }
+
+  private mergeWorkflowModelsIntoModels() {
+    const nonWf = this.models.filter((m) => m.type !== 'comfy_workflow');
+    const wfModels: Model[] = (this.comfyWorkflowFiles || []).map((w) => ({
+      name: w.filename,
+      type: 'comfy_workflow',
+    }));
+    this.models = [...nonWf, ...wfModels];
+  }
+
+  loadComfyWorkflows() {
+    this.generationService.getWorkflows().subscribe({
+      next: (res) => {
+        this.comfyWorkflowFiles = res.workflows || [];
+        this.mergeWorkflowModelsIntoModels();
+      },
+      error: () => {
+        this.comfyWorkflowFiles = [];
+        this.mergeWorkflowModelsIntoModels();
+      },
     });
   }
 
@@ -1970,7 +2057,7 @@ export class AppComponent implements OnInit, OnDestroy {
       id: `result-${i}`,
       prompt: this.prompt,
       neg_prompt: this.negativePrompt,
-      checkpoint: this.effectiveImageCheckpoint(),
+      checkpoint: this.isSelectedImageComfyWorkflow() ? this.selectedModel : this.effectiveImageCheckpoint(),
       width: this.width,
       height: this.height,
       filename: '',
@@ -2139,6 +2226,7 @@ export class AppComponent implements OnInit, OnDestroy {
       llm_content_filter: this.llmFilterMandatory
         ? 'true'
         : (this.llmContentFilterUserEnabled ? 'true' : 'false'),
+      xdit_url: this.configXditUrl,
     }).subscribe({
       next: (res: any) => {
         this.savingConfig = false;
@@ -2171,6 +2259,14 @@ export class AppComponent implements OnInit, OnDestroy {
           this.llmFilterCanToggle = !!lf.can_toggle;
           this.llmContentFilterUserEnabled = lf.mandatory ? true : !!lf.user_enabled;
         }
+        if (this.configXditUrl) {
+          this.generationService.getXditHealth().subscribe({
+            next: (h: any) => { this.xditAvailable = h.status === 'ok'; },
+            error: () => { this.xditAvailable = false; },
+          });
+        } else {
+          this.xditAvailable = false;
+        }
       },
       error: () => {
         this.savingConfig = false;
@@ -2201,6 +2297,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.generatedImages = [];
     this.generatedVideos = [];
 
+    const wfName = this.isSelectedImageComfyWorkflow() ? this.selectedModel : '';
     const request: GenerationRequest = {
       prompt: this.prompt,
       negative_prompt: this.negativePrompt,
@@ -2209,7 +2306,8 @@ export class AppComponent implements OnInit, OnDestroy {
       steps: this.steps,
       cfg_scale: this.cfg,
       sampler: this.sampler,
-      checkpoint: this.effectiveImageCheckpoint(),
+      checkpoint: wfName ? undefined : (this.effectiveImageCheckpoint() || undefined),
+      comfy_workflow: wfName || undefined,
       seed: -1,
       strength: this.strength,
     };
@@ -2311,25 +2409,43 @@ export class AppComponent implements OnInit, OnDestroy {
       steps: this.steps,
       cfg_scale: this.cfg,
       sampler: this.sampler,
-      checkpoint: this.selectedVideoModel || undefined,
       seed: -1,
     };
 
-    this.generationService.generateTxt2Video(request).subscribe({
-      next: (response) => {
-        if (response.status === 'missing_loras' && response.missing_loras) {
+    const useXdit = this.selectedVideoModel === '__xdit__';
+
+    if (useXdit) {
+      this.generationService.generateTxt2VideoXdit(request).subscribe({
+        next: (response) => {
+          this.showToast('Generación xDiT iniciada (multi-GPU)', 'success');
+          this.pollJob(response.job_id);
+        },
+        error: (err) => {
+          this.showToast('Error xDiT: ' + (err.error?.detail || err.message), 'error');
           this.generating = false;
-          this.handleMissingLoras(response.missing_loras);
-          return;
         }
-        this.showToast('Generaci\u00f3n de video iniciada', 'success');
-        this.pollJob(response.job_id);
-      },
-      error: (err) => {
-        this.showToast('Error: ' + err.message, 'error');
-        this.generating = false;
-      }
-    });
+      });
+    } else {
+      const vidWf = this.isSelectedVideoComfyWorkflow() ? this.selectedVideoModel.trim() : '';
+      request.checkpoint = vidWf ? undefined : (this.selectedVideoModel || undefined);
+      request.comfy_workflow = vidWf || undefined;
+
+      this.generationService.generateTxt2Video(request).subscribe({
+        next: (response) => {
+          if (response.status === 'missing_loras' && response.missing_loras) {
+            this.generating = false;
+            this.handleMissingLoras(response.missing_loras);
+            return;
+          }
+          this.showToast('Generación de video iniciada', 'success');
+          this.pollJob(response.job_id);
+        },
+        error: (err) => {
+          this.showToast('Error: ' + err.message, 'error');
+          this.generating = false;
+        }
+      });
+    }
 
     this.generationService.saveSettings({
       strength: this.strength,
@@ -2566,6 +2682,7 @@ export class AppComponent implements OnInit, OnDestroy {
       'cog': '\u2699\uFE0F',
       'arrow-up': '\u2B06\uFE0F',
       'folder': '\u{1F4C1}',
+      'diagram': '\u{1F4C4}',
     };
     return icons[icon] || '\u{1F4C1}';
   }
@@ -2992,8 +3109,9 @@ export class AppComponent implements OnInit, OnDestroy {
     }
     if (meta.Model || meta.model || meta.checkpoint) {
       const modelName = meta.Model || meta.model || meta.checkpoint;
-      // Only set if model exists in available models
       if (this.models.some(m => m.name === modelName)) {
+        this.handleModelChange(modelName);
+      } else if ((this.comfyWorkflowFiles || []).some((w) => w.filename === modelName)) {
         this.handleModelChange(modelName);
       }
     }
@@ -3018,10 +3136,47 @@ export class AppComponent implements OnInit, OnDestroy {
 
   /** Nunca enviar el valor centinela al backend. */
   effectiveImageCheckpoint(): string {
+    const sel = this.models.find((m) => m.name === this.selectedModel);
+    if (sel?.type === 'comfy_workflow') {
+      return '';
+    }
     if (this.selectedModel === this.modelPickAdvanced) {
       return this.lastRealImageModel || this.firstImageModelName();
     }
     return this.selectedModel;
+  }
+
+  isSelectedImageComfyWorkflow(): boolean {
+    const sel = this.models.find((m) => m.name === this.selectedModel);
+    return sel?.type === 'comfy_workflow';
+  }
+
+  /** Workflows de vídeo que no están en favoritos (selector principal y avanzado comparten lista). */
+  videoWorkflowFilesNotFavorite(): ComfyWorkflowFile[] {
+    const fav = new Set(
+      (this.modelFavoriteEntries || [])
+        .filter((f) => f.folder === 'workflows')
+        .map((f) => f.filename),
+    );
+    return (this.comfyWorkflowFiles || []).filter((w) => !fav.has(w.filename));
+  }
+
+  favoriteVideoWorkflowPickList(): { filename: string; display: string }[] {
+    const sorted = [...(this.modelFavoriteEntries || [])]
+      .filter((f) => f.folder === 'workflows')
+      .sort((a, b) => a.sort_order - b.sort_order || a.filename.localeCompare(b.filename));
+    return sorted
+      .filter((f) => (this.comfyWorkflowFiles || []).some((w) => w.filename === f.filename))
+      .map((f) => ({
+        filename: f.filename,
+        display: (f.label || '').trim() || f.filename,
+      }));
+  }
+
+  isSelectedVideoComfyWorkflow(): boolean {
+    const v = (this.selectedVideoModel || '').trim();
+    if (!v) return false;
+    return (this.comfyWorkflowFiles || []).some((w) => w.filename === v);
   }
 
   getSelectedModelType(): string | undefined {
@@ -3060,7 +3215,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   isPrincipalSelectorInventoryCategory(catKey: string): boolean {
-    return catKey === 'image_models' || catKey === 'video_models';
+    return catKey === 'image_models' || catKey === 'video_models' || catKey === 'comfy_workflows';
   }
 
   useFavoriteShortcutsForMainModel(): boolean {
@@ -3083,10 +3238,21 @@ export class AppComponent implements OnInit, OnDestroy {
     if (cur && !favSet.has(favKey(folder(cur.type), cur.name))) {
       out.push({ name: cur.name, display: '(actual) ' + cur.name });
     }
+    const curWf = this.models.find((m) => m.name === this.selectedModel && m.type === 'comfy_workflow');
+    if (curWf && !favSet.has(favKey('workflows', curWf.name))) {
+      out.push({ name: curWf.name, display: '(actual) ' + curWf.name });
+    }
     const sorted = [...entries].sort(
       (a, b) => a.sort_order - b.sort_order || a.filename.localeCompare(b.filename)
     );
     for (const f of sorted) {
+      if (f.folder === 'workflows') {
+        if ((this.comfyWorkflowFiles || []).some((w) => w.filename === f.filename)) {
+          const disp = (f.label || '').trim() || f.filename;
+          out.push({ name: f.filename, display: disp });
+        }
+        continue;
+      }
       const m = imageModels.find((x) => x.name === f.filename && folder(x.type) === f.folder);
       if (m) {
         const disp = (f.label || '').trim() || m.name;

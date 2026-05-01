@@ -30,6 +30,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 # Instalar dependencias del sistema
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -45,6 +46,8 @@ COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 COPY backend/main.py .
 COPY backend/oauth_microsoft.py .
 COPY backend/workflow_krita.py .
+COPY backend/comfy_user_workflow.py .
+COPY backend/comfy_ui_workflow_convert.py .
 COPY backend/civitai.py .
 COPY backend/architectures.py .
 COPY backend/architectures.json .

@@ -32,6 +32,8 @@ export interface GenerationRequest {
   model_type?: string;
   seed: number;
   strength?: number;
+  /** JSON de workflow API en Comfy (p. ej. veo3, nanobanana); excluye checkpoint estándar */
+  comfy_workflow?: string;
 }
 
 export interface GenerationVideoRequest {
@@ -48,6 +50,16 @@ export interface GenerationVideoRequest {
   vae?: string;
   clip?: string;
   seed: number;
+  comfy_workflow?: string;
+}
+
+export interface ComfyWorkflowFile {
+  filename: string;
+  size_bytes: number;
+}
+
+export interface WorkflowsListResponse {
+  workflows: ComfyWorkflowFile[];
 }
 
 export interface MissingLoraCandidate {
@@ -133,6 +145,8 @@ export interface ComfyConfig {
   /** Persistido en SQLite; el servidor puede forzar "true" si CONTENT_FILTER != 0 */
   llm_content_filter?: string;
   llm_filter?: LlmFilterInfo;
+  /** URL del servicio xDiT para generación de vídeo directa (ej: http://192.168.7.101:6000) */
+  xdit_url?: string;
 }
 
 export interface ConnectionTestResult {

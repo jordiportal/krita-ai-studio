@@ -19,6 +19,7 @@ import {
   InventoryResponse,
   ModelFavoritesResponse,
   ModelFavoritePutPayload,
+  WorkflowsListResponse,
   ArchitecturesResponse,
   ModelOverrideResponse,
   ModelOverridesListResponse,
@@ -86,6 +87,17 @@ export class GenerationService {
       `${this.apiUrl}/generate/txt2video`,
       request
     );
+  }
+
+  generateTxt2VideoXdit(request: GenerationVideoRequest): Observable<GenerationResponse> {
+    return this.http.post<GenerationResponse>(
+      `${this.apiUrl}/generate/txt2video-xdit`,
+      request
+    );
+  }
+
+  getXditHealth(): Observable<any> {
+    return this.http.get(`${this.apiUrl}/xdit/health`);
   }
 
   getVideoUrl(videoId: string): string {
@@ -164,6 +176,10 @@ export class GenerationService {
 
   getInventory(): Observable<InventoryResponse> {
     return this.http.get<InventoryResponse>(`${this.apiUrl}/inventory`);
+  }
+
+  getWorkflows(): Observable<WorkflowsListResponse> {
+    return this.http.get<WorkflowsListResponse>(`${this.apiUrl}/workflows`);
   }
 
   getModelFavorites(): Observable<ModelFavoritesResponse> {

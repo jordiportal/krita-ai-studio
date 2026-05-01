@@ -7,6 +7,7 @@ JWT auth con pantalla de login
 """
 
 import os
+import asyncio
 import base64
 import hashlib
 import random
@@ -37,6 +38,12 @@ from workflow_krita import (
 )
 from architectures import get_arch_manager
 from civitai import router as civitai_router, configure as configure_civitai, get_content_filter_info
+from comfy_user_workflow import (
+    fetch_workflow_file_list,
+    fetch_workflow_json,
+    inject_into_api_workflow,
+    is_safe_workflow_filename,
+)
 from oauth_microsoft import (
     oauth_env_configured,
     build_authorize_url,
@@ -313,6 +320,12 @@ def get_comfyui_url() -> str:
     port = cfg.get("comfyui_port", "8188")
     secure = cfg.get("comfyui_secure", "false").lower() == "true"
     return f"{'https' if secure else 'http'}://{host}:{port}"
+
+
+def get_xdit_url() -> Optional[str]:
+    cfg = get_comfyui_config()
+    url = cfg.get("xdit_url", "").strip()
+    return url if url else None
 
 
 def get_auth_credentials() -> tuple[str, str]:
@@ -597,11 +610,29 @@ def save_gallery_video(
         ext = ".gif"
     elif len(video_bytes) >= 4 and video_bytes[:4] == b"\x1aE\xdf\xa3":
         ext = ".webm"
+    elif len(video_bytes) >= 8 and video_bytes[4:8] == b"ftyp":
+        ext = ".mp4"
     else:
         ext = ".webp"
     filename = f"{vid_id}{ext}"
     filepath = GALLERY_DIR / filename
     filepath.write_bytes(video_bytes)
+
+    if ext == ".mp4":
+        import subprocess
+        h264_path = GALLERY_DIR / f"{vid_id}_h264.mp4"
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", str(filepath), "-c:v", "libx264",
+                 "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p",
+                 "-movflags", "+faststart", str(h264_path)],
+                capture_output=True, timeout=120,
+            )
+            if h264_path.exists() and h264_path.stat().st_size > 0:
+                h264_path.replace(filepath)
+        except Exception:
+            if h264_path.exists():
+                h264_path.unlink()
 
     now = time.time()
     conn = sqlite3.connect(str(DB_PATH))
@@ -803,6 +834,7 @@ class GenerationRequest(BaseModel):
     checkpoint: Optional[str] = None
     model_type: Optional[str] = None  # "checkpoint" or "diffusion_model"
     strength: float = 1.0
+    comfy_workflow: Optional[str] = None  # nombre archivo JSON en Comfy (KAS)
 
 
 class MissingLoraResult(BaseModel):
@@ -835,6 +867,7 @@ class GenerationVideoRequest(BaseModel):
     checkpoint: Optional[str] = None  # UNet/Checkpoint para Wan
     vae: Optional[str] = None  # VAE para Wan
     clip: Optional[str] = None  # T5/UMT5 para Wan
+    comfy_workflow: Optional[str] = None  # workflow API JSON (vídeo custom)
 
 
 class ModelFavoritePayload(BaseModel):
@@ -871,6 +904,7 @@ class ConfigPayload(BaseModel):
     llm_temperature: Optional[str] = None
     llm_max_tokens: Optional[str] = None
     llm_content_filter: Optional[str] = None
+    xdit_url: Optional[str] = None
 
 
 class LLMTestPayload(BaseModel):
@@ -1657,8 +1691,8 @@ INVENTORY_CATEGORIES = {
     },
 }
 
-# Carpetas cuyos archivos pueden aparecer en el selector principal de imagen
-FAVORITE_MODEL_FOLDERS = frozenset({"checkpoints", "diffusion_models"})
+# Carpetas cuyos archivos pueden aparecer en el selector principal de imagen / vídeo (favoritos)
+FAVORITE_MODEL_FOLDERS = frozenset({"checkpoints", "diffusion_models", "workflows"})
 
 
 def _load_model_favorites_map() -> Dict[tuple, Dict[str, Any]]:
@@ -1799,6 +1833,46 @@ async def get_inventory():
             "count": len(items),
             "total_bytes": cat_size,
         })
+
+    # Workflows API (JSON) listados vía KAS; no forman parte de `models` del plugin
+    try:
+        wf_list = await fetch_workflow_file_list(comfy_url)
+    except Exception:
+        wf_list = []
+    wf_items: List[Dict[str, Any]] = []
+    wf_size = 0
+    for wf in wf_list:
+        fn = str(wf.get("filename", "") or "").strip()
+        if not fn:
+            continue
+        size = int(wf.get("size_bytes", 0) or 0)
+        wf_size += size
+        fav = fav_map.get(("workflows", fn))
+        wf_items.append({
+            "filename": fn,
+            "folder": "workflows",
+            "size_bytes": size,
+            "base_model": "",
+            "architecture": "workflow",
+            "architecture_label": "Workflow ComfyUI",
+            "has_override": False,
+            "from_civitai": False,
+            "civitai_name": None,
+            "civitai_model_id": None,
+            "is_favorite": fav is not None,
+            "favorite_label": fav["label"] if fav else None,
+        })
+    wf_items.sort(key=lambda x: x["filename"].lower())
+    total_files += len(wf_items)
+    total_size += wf_size
+    categories.append({
+        "key": "comfy_workflows",
+        "label": "Workflows ComfyUI",
+        "icon": "diagram",
+        "items": wf_items,
+        "count": len(wf_items),
+        "total_bytes": wf_size,
+    })
 
     # Descargas activas
     active_downloads = []
@@ -2126,6 +2200,17 @@ async def get_samplers():
     return {"samplers": samplers}
 
 
+@app.get("/api/workflows")
+async def list_comfy_workflows():
+    """Lista JSON de workflows API disponibles en ComfyUI (plugin KAS)."""
+    comfy_url = get_comfyui_url()
+    try:
+        items = await fetch_workflow_file_list(comfy_url)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"workflows": items}
+
+
 # ─── Generation ───────────────────────────────────────────────────────────────
 
 @app.post("/api/generate/txt2img", response_model=GenerationResponse)
@@ -2135,7 +2220,7 @@ async def txt2img(http_request: Request, body: GenerationRequest):
     try:
         actual_seed = body.seed
         if actual_seed < 0:
-            actual_seed = random.randint(0, 2**32 - 1)
+            actual_seed = random.randint(0, 2**31 - 1)
 
         clean_prompt, lora_tags = parse_lora_tags(body.prompt)
         resolved_loras = None
@@ -2182,31 +2267,52 @@ async def txt2img(http_request: Request, body: GenerationRequest):
 
         prompt_text = clean_prompt if lora_tags else body.prompt
         prompt_text = await _maybe_apply_llm_prompt_filter(cfg, prompt_text)
-        model_name = body.checkpoint or "SDXL.safetensors"
+        wf_req = (body.comfy_workflow or "").strip()
 
-        arch_mgr = get_arch_manager()
-        arch_config = arch_mgr.resolve(model_name)
-        arch_id = arch_config.get("_arch_id", "sd15")
+        if wf_req:
+            if not is_safe_workflow_filename(wf_req):
+                raise HTTPException(status_code=400, detail="Nombre de workflow no válido")
+            try:
+                api_wf = await fetch_workflow_json(comfy_url, wf_req)
+            except Exception as e:
+                raise HTTPException(status_code=502, detail=f"No se pudo cargar el workflow: {e}")
+            workflow = inject_into_api_workflow(
+                api_wf,
+                prompt=prompt_text,
+                negative_prompt=body.negative_prompt or "",
+                width=body.width,
+                height=body.height,
+                seed=actual_seed,
+            )
+            model_name = wf_req
+            arch_id = "workflow"
+            print(f"[txt2img] comfy_workflow={wf_req} nodes={len(workflow)} seed={actual_seed} prompt={prompt_text!r:.120}")
+        else:
+            model_name = body.checkpoint or "SDXL.safetensors"
 
-        print(f"[txt2img] model={model_name}, arch={arch_id}, loader={arch_config.get('loader')}")
-        print(f"[txt2img] size={body.width}x{body.height}, steps={body.steps}, cfg={body.cfg_scale}, sampler={body.sampler}")
+            arch_mgr = get_arch_manager()
+            arch_config = arch_mgr.resolve(model_name)
+            arch_id = arch_config.get("_arch_id", "sd15")
 
-        workflow = build_txt2img_workflow(
-            arch_config=arch_config,
-            prompt=prompt_text,
-            negative_prompt=body.negative_prompt or "",
-            model_name=model_name,
-            sampler=body.sampler or "",
-            scheduler=body.scheduler or "",
-            steps=body.steps,
-            cfg=body.cfg_scale,
-            seed=actual_seed,
-            width=body.width,
-            height=body.height,
-            batch_size=1,
-            loras=resolved_loras if resolved_loras else None,
-        )
-        print(f"[txt2img] Workflow built: arch={arch_id}, nodes={list(workflow.keys())}, seed={actual_seed}")
+            print(f"[txt2img] model={model_name}, arch={arch_id}, loader={arch_config.get('loader')}")
+            print(f"[txt2img] size={body.width}x{body.height}, steps={body.steps}, cfg={body.cfg_scale}, sampler={body.sampler}")
+
+            workflow = build_txt2img_workflow(
+                arch_config=arch_config,
+                prompt=prompt_text,
+                negative_prompt=body.negative_prompt or "",
+                model_name=model_name,
+                sampler=body.sampler or "",
+                scheduler=body.scheduler or "",
+                steps=body.steps,
+                cfg=body.cfg_scale,
+                seed=actual_seed,
+                width=body.width,
+                height=body.height,
+                batch_size=1,
+                loras=resolved_loras if resolved_loras else None,
+            )
+            print(f"[txt2img] Workflow built: arch={arch_id}, nodes={list(workflow.keys())}, seed={actual_seed}")
 
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -2226,7 +2332,7 @@ async def txt2img(http_request: Request, body: GenerationRequest):
             _job_meta[prompt_id] = {
                 "prompt": prompt_text,
                 "neg_prompt": body.negative_prompt or "",
-                "checkpoint": body.checkpoint or "",
+                "checkpoint": wf_req or (body.checkpoint or ""),
                 "width": body.width,
                 "height": body.height,
                 "seed": actual_seed,
@@ -2255,6 +2361,23 @@ _saved_jobs: set = set()
 
 @app.get("/api/jobs/{job_id}")
 async def get_job_status(job_id: str):
+    # xDiT jobs are handled in-memory, not via ComfyUI
+    if job_id.startswith("xdit-") and job_id in _xdit_jobs:
+        job = _xdit_jobs[job_id]
+        result: Dict[str, Any] = {
+            "job_id": job_id,
+            "status": job["status"],
+            "progress": job.get("progress", 0),
+            "is_video": True,
+        }
+        if job["status"] == "completed":
+            result["gallery_video_ids"] = job.get("gallery_video_ids", [])
+            del _xdit_jobs[job_id]
+        elif job["status"] == "error":
+            result["error"] = job.get("error", "Unknown xDiT error")
+            del _xdit_jobs[job_id]
+        return result
+
     comfy_url = get_comfyui_url()
     try:
         async with httpx.AsyncClient() as client:
@@ -2314,9 +2437,13 @@ async def get_job_status(job_id: str):
 
                     if status_str == "error":
                         msgs = status_info.get("messages", [])
-                        err_msg = (
-                            str(msgs[-1]) if msgs else "ComfyUI execution error"
-                        )
+                        err_msg = "ComfyUI execution error"
+                        for m in reversed(msgs):
+                            if isinstance(m, list) and len(m) > 1 and isinstance(m[1], dict):
+                                ex_msg = m[1].get("exception_message", "")
+                                if ex_msg:
+                                    err_msg = ex_msg.strip().split("\n")[0][:300]
+                                    break
                         return {
                             "job_id": job_id,
                             "status": "error",
@@ -2324,46 +2451,89 @@ async def get_job_status(job_id: str):
                         }
 
                     outputs = job_data.get("outputs", {})
+                    print(f"[job {job_id}] status_str={status_str}, output_nodes={list(outputs.keys())}")
+                    for _nid, _nout in outputs.items():
+                        if isinstance(_nout, dict):
+                            print(f"  node {_nid}: keys={list(_nout.keys())}, images={_nout.get('images', [])[:3]}, gifs={_nout.get('gifs', [])[:3]}")
                     images_base64: List[str] = []
                     images_raw: List[bytes] = []
                     video_files: List[Dict[str, str]] = []
 
                     ANIMATED_EXTENSIONS = (".webp", ".gif", ".apng")
+                    STATIC_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".jpe", ".bmp", ".tif", ".tiff")
 
+                    async def _fetch_comfy_view_image(img_meta: Dict[str, Any]) -> Optional[bytes]:
+                        """Descarga bytes desde /view (Salvar imagen / PreviewImage de Comfy nativo)."""
+                        fname = img_meta.get("filename", "")
+                        if not fname or fname[0] == "/" or ".." in fname:
+                            return None
+                        sub = img_meta.get("subfolder", "") or ""
+                        out_type = img_meta.get("type", "output") or "output"
+                        params = {"filename": fname, "subfolder": sub, "type": out_type}
+                        for path in ("/view", "/api/view"):
+                            try:
+                                img_resp = await client.get(
+                                    f"{comfy_url.rstrip('/')}{path}",
+                                    params=params,
+                                    timeout=60.0,
+                                )
+                                if img_resp.status_code == 200 and img_resp.content:
+                                    return img_resp.content
+                            except Exception:
+                                continue
+                        return None
+
+                    all_img_metas: List[Dict[str, Any]] = []
                     for node_id, node_output in outputs.items():
                         if not isinstance(node_output, dict):
                             continue
-                        images = node_output.get("images", [])
-                        for img in images:
-                            if not isinstance(img, dict):
+                        for img in node_output.get("images", []):
+                            if isinstance(img, dict):
+                                all_img_metas.append(img)
+
+                    has_output_images = any(
+                        m.get("type") == "output"
+                        and any(m.get("filename", "").lower().endswith(e) for e in STATIC_IMAGE_EXTENSIONS)
+                        for m in all_img_metas
+                    )
+
+                    for img in all_img_metas:
+                        # Format A: KAS plugin (source=http, id=kas_xxx)
+                        if img.get("source") == "http":
+                            img_id = img.get("id")
+                            if img_id and img_id.startswith("kas_"):
+                                video_files.append({"type": "kas", "id": img_id})
+                            elif img_id:
+                                img_resp = await client.get(
+                                    f"{comfy_url}/api/etn/image/{img_id}",
+                                    timeout=60.0,
+                                )
+                                if img_resp.status_code == 200:
+                                    images_raw.append(img_resp.content)
+                                    img_b64 = base64.b64encode(
+                                        img_resp.content
+                                    ).decode("utf-8")
+                                    images_base64.append(img_b64)
+
+                        # Format B: ComfyUI native (type=output|temp, filename=…)
+                        elif img.get("type") in ("output", "temp", "input"):
+                            if img.get("type") == "temp" and has_output_images:
                                 continue
-
-                            # Format A: KAS plugin (source=http, id=kas_xxx)
-                            if img.get("source") == "http":
-                                img_id = img.get("id")
-                                if img_id and img_id.startswith("kas_"):
-                                    video_files.append({"type": "kas", "id": img_id})
-                                elif img_id:
-                                    img_resp = await client.get(
-                                        f"{comfy_url}/api/etn/image/{img_id}",
-                                        timeout=60.0,
+                            fname = img.get("filename", "")
+                            lower = fname.lower()
+                            if any(lower.endswith(ext) for ext in ANIMATED_EXTENSIONS):
+                                video_files.append({
+                                    "type": "comfyui",
+                                    "filename": fname,
+                                    "subfolder": img.get("subfolder", ""),
+                                })
+                            elif any(lower.endswith(ext) for ext in STATIC_IMAGE_EXTENSIONS):
+                                raw = await _fetch_comfy_view_image(img)
+                                if raw:
+                                    images_raw.append(raw)
+                                    images_base64.append(
+                                        base64.b64encode(raw).decode("utf-8")
                                     )
-                                    if img_resp.status_code == 200:
-                                        images_raw.append(img_resp.content)
-                                        img_b64 = base64.b64encode(
-                                            img_resp.content
-                                        ).decode("utf-8")
-                                        images_base64.append(img_b64)
-
-                            # Format B: ComfyUI native (type=output, filename=xxx.webp)
-                            elif img.get("type") == "output":
-                                fname = img.get("filename", "")
-                                if any(fname.lower().endswith(ext) for ext in ANIMATED_EXTENSIONS):
-                                    video_files.append({
-                                        "type": "comfyui",
-                                        "filename": fname,
-                                        "subfolder": img.get("subfolder", ""),
-                                    })
 
                     # Manejar videos / animated outputs
                     if video_files:
@@ -2502,6 +2672,148 @@ async def proxy_video(video_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ─── xDiT direct video generation ─────────────────────────────────────────────
+
+_xdit_jobs: Dict[str, Dict[str, Any]] = {}
+
+
+async def _xdit_generate_task(job_id: str, xdit_url: str, payload: dict, meta: dict):
+    """Background task: calls xDiT /generate and stores result."""
+    try:
+        _xdit_jobs[job_id]["status"] = "processing"
+        _xdit_jobs[job_id]["progress"] = 5
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{xdit_url}/generate",
+                json=payload,
+                timeout=600.0,
+            )
+            if resp.status_code != 200:
+                _xdit_jobs[job_id]["status"] = "error"
+                _xdit_jobs[job_id]["error"] = f"xDiT error {resp.status_code}: {resp.text[:300]}"
+                return
+
+            result = resp.json()
+
+        videos_b64 = result.get("videos", [])
+        if not videos_b64:
+            _xdit_jobs[job_id]["status"] = "error"
+            _xdit_jobs[job_id]["error"] = "xDiT returned no video"
+            return
+
+        gallery_video_ids = []
+        for vid in videos_b64:
+            raw = base64.b64decode(vid.get("base64", ""))
+            entry = save_gallery_video(
+                video_bytes=raw,
+                prompt=meta.get("prompt", ""),
+                neg_prompt=meta.get("neg_prompt", ""),
+                checkpoint="xDiT (Wan2.2-T2V-A14B)",
+                width=meta.get("width", 0),
+                height=meta.get("height", 0),
+                seed=meta.get("seed", 0),
+                steps=meta.get("steps", 0),
+                cfg=meta.get("cfg", 0.0),
+                length=meta.get("length", 0),
+                fps=meta.get("fps", 0.0),
+                owner_user_id=meta.get("owner_user_id"),
+            )
+            gallery_video_ids.append(entry["id"])
+
+        elapsed = result.get("elapsed_seconds", 0)
+        print(f"[xDiT] Job {job_id} completed in {elapsed:.1f}s, {len(gallery_video_ids)} video(s)")
+
+        _xdit_jobs[job_id]["status"] = "completed"
+        _xdit_jobs[job_id]["progress"] = 100
+        _xdit_jobs[job_id]["gallery_video_ids"] = gallery_video_ids
+        _xdit_jobs[job_id]["is_video"] = True
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        _xdit_jobs[job_id]["status"] = "error"
+        _xdit_jobs[job_id]["error"] = str(e)
+
+
+@app.post("/api/generate/txt2video-xdit", response_model=GenerationResponse)
+async def txt2video_xdit(http_request: Request, body: GenerationVideoRequest):
+    """Genera video directamente via xDiT (sin ComfyUI)."""
+    xdit_url = get_xdit_url()
+    if not xdit_url:
+        raise HTTPException(status_code=400, detail="xDiT URL no configurada. Ve a Configuración y añade la URL del servicio xDiT.")
+
+    try:
+        actual_seed = body.seed
+        if actual_seed < 0:
+            actual_seed = random.randint(0, 2**31 - 1)
+
+        cfg = get_comfyui_config()
+        prompt_text = body.prompt
+        prompt_text = await _maybe_apply_llm_prompt_filter(cfg, prompt_text)
+
+        job_id = f"xdit-{uuid.uuid4().hex[:12]}"
+        owner_uid = _job_owner_user_id(http_request)
+
+        payload = {
+            "prompt": prompt_text,
+            "negative_prompt": body.negative_prompt or "",
+            "width": body.width,
+            "height": body.height,
+            "num_inference_steps": body.steps or 20,
+            "num_frames": body.length or 17,
+            "guidance_scale": body.cfg_scale if body.cfg_scale > 0 else 3.5,
+            "seed": actual_seed,
+        }
+
+        meta = {
+            "prompt": prompt_text,
+            "neg_prompt": body.negative_prompt or "",
+            "width": body.width,
+            "height": body.height,
+            "length": body.length,
+            "fps": body.fps,
+            "seed": actual_seed,
+            "steps": body.steps or 20,
+            "cfg": body.cfg_scale,
+            "owner_user_id": owner_uid,
+        }
+
+        _xdit_jobs[job_id] = {
+            "status": "queued",
+            "progress": 0,
+            "is_video": True,
+        }
+
+        asyncio.create_task(_xdit_generate_task(job_id, xdit_url, payload, meta))
+
+        print(f"[xDiT] Job {job_id} queued: {body.width}x{body.height}, {body.length} frames, {body.steps} steps")
+        return GenerationResponse(job_id=job_id, status="queued")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/xdit/health")
+async def xdit_health():
+    """Checks xDiT service availability."""
+    xdit_url = get_xdit_url()
+    if not xdit_url:
+        return {"status": "not_configured"}
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{xdit_url}/health", timeout=5.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                return {"status": "ok", **data}
+            return {"status": "error", "message": f"HTTP {resp.status_code}"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 @app.post("/api/generate/txt2video", response_model=GenerationResponse)
 async def txt2video(http_request: Request, body: GenerationVideoRequest):
     """Genera video usando Wan 2.x T2V via workflow con soporte LoRA."""
@@ -2510,7 +2822,7 @@ async def txt2video(http_request: Request, body: GenerationVideoRequest):
     try:
         actual_seed = body.seed
         if actual_seed < 0:
-            actual_seed = random.randint(0, 2**32 - 1)
+            actual_seed = random.randint(0, 2**31 - 1)
 
         VIDEO_UNET_DEFAULT = "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors"
         available_unets: list[str] = []
@@ -2530,8 +2842,12 @@ async def txt2video(http_request: Request, body: GenerationVideoRequest):
         except Exception:
             pass
 
+        wf_req = (body.comfy_workflow or "").strip()
         req_checkpoint = body.checkpoint or ""
-        video_checkpoint = req_checkpoint if req_checkpoint in available_unets else VIDEO_UNET_DEFAULT
+        if wf_req:
+            video_checkpoint = wf_req
+        else:
+            video_checkpoint = req_checkpoint if req_checkpoint in available_unets else VIDEO_UNET_DEFAULT
 
         # Parse LoRA tags from prompt
         clean_prompt, lora_tags = parse_lora_tags(body.prompt)
@@ -2567,39 +2883,62 @@ async def txt2video(http_request: Request, body: GenerationVideoRequest):
         prompt_text = clean_prompt if lora_tags else body.prompt
         prompt_text = await _maybe_apply_llm_prompt_filter(cfg, prompt_text)
 
-        arch_mgr = get_arch_manager()
-        video_arch_config = arch_mgr.resolve(video_checkpoint)
+        if wf_req:
+            if not is_safe_workflow_filename(wf_req):
+                raise HTTPException(status_code=400, detail="Nombre de workflow no válido")
+            try:
+                api_wf = await fetch_workflow_json(comfy_url, wf_req)
+            except Exception as e:
+                raise HTTPException(status_code=502, detail=f"No se pudo cargar el workflow: {e}")
+            workflow = inject_into_api_workflow(
+                api_wf,
+                prompt=prompt_text,
+                negative_prompt=body.negative_prompt or "",
+                width=body.width,
+                height=body.height,
+                seed=actual_seed,
+                length=body.length,
+                fps=body.fps,
+            )
+            video_checkpoint = wf_req
+            print(
+                f"[txt2video] comfy_workflow={wf_req} nodes={len(workflow)} seed={actual_seed} "
+                f"length={body.length} fps={body.fps}"
+            )
+        else:
+            arch_mgr = get_arch_manager()
+            video_arch_config = arch_mgr.resolve(video_checkpoint)
 
-        low_unet: Optional[str] = None
-        if "high_noise" in video_checkpoint.lower():
-            cand = video_checkpoint.replace("high_noise", "low_noise")
-            if cand in available_unets:
-                low_unet = cand
+            low_unet: Optional[str] = None
+            if "high_noise" in video_checkpoint.lower():
+                cand = video_checkpoint.replace("high_noise", "low_noise")
+                if cand in available_unets:
+                    low_unet = cand
 
-        workflow = build_txt2video_workflow(
-            arch_config=video_arch_config,
-            prompt=prompt_text,
-            negative_prompt=body.negative_prompt or "",
-            model_name=video_checkpoint,
-            low_noise_model=low_unet,
-            vae_override=body.vae or "",
-            clip_override=body.clip or "",
-            sampler=body.sampler or "",
-            scheduler=body.scheduler or "",
-            steps=body.steps or 20,
-            cfg=body.cfg_scale,
-            seed=actual_seed,
-            width=body.width,
-            height=body.height,
-            length=body.length,
-            fps=body.fps,
-            batch_size=1,
-            loras=resolved_loras,
-        )
-        print(
-            f"[txt2video] arch={video_arch_config.get('_arch_id')}, unet={video_checkpoint}, "
-            f"dual={low_unet is not None}, low={low_unet or '-'}, seed={actual_seed}, length={body.length}, loras={len(resolved_loras or [])}"
-        )
+            workflow = build_txt2video_workflow(
+                arch_config=video_arch_config,
+                prompt=prompt_text,
+                negative_prompt=body.negative_prompt or "",
+                model_name=video_checkpoint,
+                low_noise_model=low_unet,
+                vae_override=body.vae or "",
+                clip_override=body.clip or "",
+                sampler=body.sampler or "",
+                scheduler=body.scheduler or "",
+                steps=body.steps or 20,
+                cfg=body.cfg_scale,
+                seed=actual_seed,
+                width=body.width,
+                height=body.height,
+                length=body.length,
+                fps=body.fps,
+                batch_size=1,
+                loras=resolved_loras,
+            )
+            print(
+                f"[txt2video] arch={video_arch_config.get('_arch_id')}, unet={video_checkpoint}, "
+                f"dual={low_unet is not None}, low={low_unet or '-'}, seed={actual_seed}, length={body.length}, loras={len(resolved_loras or [])}"
+            )
 
         async with httpx.AsyncClient() as client:
             response = await client.post(
