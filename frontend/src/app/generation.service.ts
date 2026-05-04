@@ -96,6 +96,13 @@ export class GenerationService {
     );
   }
 
+  generateImg2VideoXdit(request: { gallery_id: string; prompt?: string; negative_prompt?: string; length?: number; fps?: number; steps?: number; cfg_scale?: number; seed?: number }): Observable<GenerationResponse> {
+    return this.http.post<GenerationResponse>(
+      `${this.apiUrl}/generate/img2video-xdit`,
+      request
+    );
+  }
+
   getXditHealth(): Observable<any> {
     return this.http.get(`${this.apiUrl}/xdit/health`);
   }

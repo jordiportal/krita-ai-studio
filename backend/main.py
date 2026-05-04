@@ -7,6 +7,7 @@ JWT auth con pantalla de login
 """
 
 import os
+import io
 import asyncio
 import base64
 import hashlib
@@ -326,6 +327,7 @@ def get_xdit_url() -> Optional[str]:
     cfg = get_comfyui_config()
     url = cfg.get("xdit_url", "").strip()
     return url if url else None
+
 
 
 def get_auth_credentials() -> tuple[str, str]:
@@ -866,6 +868,17 @@ class GenerationVideoRequest(BaseModel):
     scheduler: str = ""
     checkpoint: Optional[str] = None  # UNet/Checkpoint para Wan
     vae: Optional[str] = None  # VAE para Wan
+
+
+class Img2VideoXditRequest(BaseModel):
+    gallery_id: str
+    prompt: str = ""
+    negative_prompt: str = ""
+    length: int = 81
+    fps: float = 8.0
+    steps: int = 20
+    cfg_scale: float = 3.5
+    seed: int = -1
     clip: Optional[str] = None  # T5/UMT5 para Wan
     comfy_workflow: Optional[str] = None  # workflow API JSON (vídeo custom)
 
@@ -2372,10 +2385,16 @@ async def get_job_status(job_id: str):
         }
         if job["status"] == "completed":
             result["gallery_video_ids"] = job.get("gallery_video_ids", [])
-            del _xdit_jobs[job_id]
+            job.setdefault("_read_count", 0)
+            job["_read_count"] += 1
+            if job["_read_count"] > 5:
+                del _xdit_jobs[job_id]
         elif job["status"] == "error":
             result["error"] = job.get("error", "Unknown xDiT error")
-            del _xdit_jobs[job_id]
+            job.setdefault("_read_count", 0)
+            job["_read_count"] += 1
+            if job["_read_count"] > 5:
+                del _xdit_jobs[job_id]
         return result
 
     comfy_url = get_comfyui_url()
@@ -2708,7 +2727,7 @@ async def _xdit_generate_task(job_id: str, xdit_url: str, payload: dict, meta: d
                 video_bytes=raw,
                 prompt=meta.get("prompt", ""),
                 neg_prompt=meta.get("neg_prompt", ""),
-                checkpoint="xDiT (Wan2.2-T2V-A14B)",
+                checkpoint=meta.get("checkpoint", "xDiT (Wan2.2-T2V-A14B)"),
                 width=meta.get("width", 0),
                 height=meta.get("height", 0),
                 seed=meta.get("seed", 0),
@@ -2754,11 +2773,25 @@ async def txt2video_xdit(http_request: Request, body: GenerationVideoRequest):
         job_id = f"xdit-{uuid.uuid4().hex[:12]}"
         owner_uid = _job_owner_user_id(http_request)
 
+        # Cap resolution to fit VRAM (max ~400k pixels)
+        MAX_PIXELS = 832 * 480
+        req_w = body.width or 832
+        req_h = body.height or 480
+        if req_w * req_h > MAX_PIXELS:
+            scale = (MAX_PIXELS / (req_w * req_h)) ** 0.5
+            req_w = int(req_w * scale) // 16 * 16
+            req_h = int(req_h * scale) // 16 * 16
+        else:
+            req_w = req_w // 16 * 16
+            req_h = req_h // 16 * 16
+        req_w = max(req_w, 16)
+        req_h = max(req_h, 16)
+
         payload = {
             "prompt": prompt_text,
             "negative_prompt": body.negative_prompt or "",
-            "width": body.width,
-            "height": body.height,
+            "width": req_w,
+            "height": req_h,
             "num_inference_steps": body.steps or 20,
             "num_frames": body.length or 17,
             "guidance_scale": body.cfg_scale if body.cfg_scale > 0 else 3.5,
@@ -2768,8 +2801,8 @@ async def txt2video_xdit(http_request: Request, body: GenerationVideoRequest):
         meta = {
             "prompt": prompt_text,
             "neg_prompt": body.negative_prompt or "",
-            "width": body.width,
-            "height": body.height,
+            "width": req_w,
+            "height": req_h,
             "length": body.length,
             "fps": body.fps,
             "seed": actual_seed,
@@ -2795,6 +2828,96 @@ async def txt2video_xdit(http_request: Request, body: GenerationVideoRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/generate/img2video-xdit", response_model=GenerationResponse)
+async def img2video_xdit(http_request: Request, body: Img2VideoXditRequest):
+    """Genera video a partir de una imagen de la galería via xDiT I2V."""
+    xdit_url = get_xdit_url()
+    if not xdit_url:
+        raise HTTPException(status_code=400, detail="xDiT URL no configurada.")
+
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM gallery WHERE id = ?", (body.gallery_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Imagen no encontrada en la galería.")
+
+    src = dict(row)
+    filepath = GALLERY_DIR / src["filename"]
+    if not filepath.exists():
+        raise HTTPException(status_code=404, detail="Archivo de imagen no encontrado.")
+
+    from PIL import Image as PILImage
+
+    image_bytes = filepath.read_bytes()
+
+    # Resize to fit VRAM constraints (max ~400k pixels: 832x480 landscape or 480x832 portrait)
+    MAX_PIXELS = 832 * 480
+    pil_img = PILImage.open(io.BytesIO(image_bytes))
+    orig_w, orig_h = pil_img.size
+    current_pixels = orig_w * orig_h
+    if current_pixels > MAX_PIXELS:
+        scale = (MAX_PIXELS / current_pixels) ** 0.5
+        new_w = int(orig_w * scale) // 16 * 16
+        new_h = int(orig_h * scale) // 16 * 16
+        new_w = max(new_w, 16)
+        new_h = max(new_h, 16)
+        pil_img = pil_img.resize((new_w, new_h), PILImage.LANCZOS)
+    else:
+        new_w = orig_w // 16 * 16
+        new_h = orig_h // 16 * 16
+        if new_w != orig_w or new_h != orig_h:
+            pil_img = pil_img.resize((new_w, new_h), PILImage.LANCZOS)
+
+    buf = io.BytesIO()
+    pil_img.save(buf, format="PNG")
+    image_b64 = base64.b64encode(buf.getvalue()).decode()
+    out_w, out_h = pil_img.size
+
+    actual_seed = body.seed
+    if actual_seed < 0:
+        actual_seed = random.randint(0, 2**31 - 1)
+
+    cfg = get_comfyui_config()
+    prompt_text = body.prompt or src.get("prompt", "")
+    prompt_text = await _maybe_apply_llm_prompt_filter(cfg, prompt_text)
+
+    job_id = f"xdit-{uuid.uuid4().hex[:12]}"
+    owner_uid = _job_owner_user_id(http_request)
+
+    payload = {
+        "prompt": prompt_text,
+        "negative_prompt": body.negative_prompt or src.get("neg_prompt", ""),
+        "image": image_b64,
+        "width": out_w,
+        "height": out_h,
+        "num_inference_steps": body.steps or 20,
+        "num_frames": body.length or 81,
+        "guidance_scale": body.cfg_scale if body.cfg_scale > 0 else 3.5,
+        "seed": actual_seed,
+    }
+
+    meta = {
+        "prompt": prompt_text,
+        "neg_prompt": body.negative_prompt or src.get("neg_prompt", ""),
+        "width": out_w,
+        "height": out_h,
+        "length": body.length or 81,
+        "fps": body.fps,
+        "seed": actual_seed,
+        "steps": body.steps or 20,
+        "cfg": body.cfg_scale,
+        "checkpoint": "xDiT I2V (Wan2.2-I2V-A14B)",
+        "owner_user_id": owner_uid,
+    }
+
+    _xdit_jobs[job_id] = {"status": "queued", "progress": 0, "is_video": True}
+    asyncio.create_task(_xdit_generate_task(job_id, xdit_url, payload, meta))
+
+    print(f"[xDiT-I2V] Job {job_id} queued from gallery:{body.gallery_id}, {body.length} frames, {body.steps} steps")
+    return GenerationResponse(job_id=job_id, status="queued")
 
 
 @app.get("/api/xdit/health")

@@ -480,6 +480,8 @@ import {
           </div>
           <div class="config-url-preview" *ngIf="configXditUrl">
             {{ xditAvailable ? '&#9989; xDiT Online' : '&#10060; xDiT Offline' }}
+            <span *ngIf="xditAvailable && xditI2vAvailable"> (T2V + I2V)</span>
+            <span *ngIf="xditAvailable && !xditI2vAvailable"> (solo T2V)</span>
           </div>
 
           <h2 class="card-title" style="margin-top: 8px;">Autenticaci&oacute;n</h2>
@@ -1231,6 +1233,12 @@ import {
                     (click)="handleUsePrompt(imageMetaData.meta)">
               Usar este prompt
             </button>
+            <button class="btn btn-secondary meta-use-btn"
+                    *ngIf="imageMetaData?.type !== 'video' && xditI2vAvailable"
+                    (click)="handleGenerateVideoFromImage(imageMetaData)"
+                    [disabled]="generating">
+              &#9654; Generar v&iacute;deo
+            </button>
           </ng-container>
 
           <div *ngIf="!imageMetaLoading && !imageMetaData" class="no-meta-msg">
@@ -1518,6 +1526,7 @@ export class AppComponent implements OnInit, OnDestroy {
   configSecure = 'false';
   configXditUrl = '';
   xditAvailable = false;
+  xditI2vAvailable = false;
   authUser = '';
   authPass = '';
   civitaiApiKey = '';
@@ -1817,11 +1826,15 @@ export class AppComponent implements OnInit, OnDestroy {
         this.configXditUrl = cfg.xdit_url || '';
         if (this.configXditUrl) {
           this.generationService.getXditHealth().subscribe({
-            next: (h: any) => { this.xditAvailable = h.status === 'ok'; },
-            error: () => { this.xditAvailable = false; },
+            next: (h: any) => {
+              this.xditAvailable = h.status === 'ok';
+              this.xditI2vAvailable = !!(h.available_models?.i2v);
+            },
+            error: () => { this.xditAvailable = false; this.xditI2vAvailable = false; },
           });
         } else {
           this.xditAvailable = false;
+          this.xditI2vAvailable = false;
         }
       },
       error: () => {}
@@ -2261,11 +2274,15 @@ export class AppComponent implements OnInit, OnDestroy {
         }
         if (this.configXditUrl) {
           this.generationService.getXditHealth().subscribe({
-            next: (h: any) => { this.xditAvailable = h.status === 'ok'; },
-            error: () => { this.xditAvailable = false; },
+            next: (h: any) => {
+              this.xditAvailable = h.status === 'ok';
+              this.xditI2vAvailable = !!(h.available_models?.i2v);
+            },
+            error: () => { this.xditAvailable = false; this.xditI2vAvailable = false; },
           });
         } else {
           this.xditAvailable = false;
+          this.xditI2vAvailable = false;
         }
       },
       error: () => {
@@ -3119,6 +3136,39 @@ export class AppComponent implements OnInit, OnDestroy {
     this.modelDetailOpen = false;
     this.activeTab = 'generate';
     this.showToast('Prompt y parámetros aplicados', 'success');
+  }
+
+  handleGenerateVideoFromImage(item: any) {
+    if (!item?.id || this.generating) return;
+    this.generating = true;
+    this.generationMode = 'video';
+    this.generationProgress = 0;
+    this.imageMetaOpen = false;
+
+    const request = {
+      gallery_id: item.id,
+      prompt: item.meta?.prompt || item.prompt || '',
+      negative_prompt: item.meta?.negativePrompt || item.neg_prompt || '',
+      length: this.videoLength,
+      fps: this.videoFps,
+      steps: this.steps,
+      cfg_scale: this.cfg,
+      seed: -1,
+    };
+
+    this.generationService.generateImg2VideoXdit(request).subscribe({
+      next: (res: any) => {
+        if (res.job_id) {
+          this.activeTab = 'generate';
+          this.showToast('Generando vídeo desde imagen...', 'success');
+          this.pollJob(res.job_id);
+        }
+      },
+      error: (err: any) => {
+        this.generating = false;
+        this.showToast(err.error?.detail || 'Error al iniciar I2V', 'error');
+      },
+    });
   }
 
   // ─── Model helpers ─────────────────────────────────────────────────

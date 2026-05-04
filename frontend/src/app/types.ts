@@ -145,8 +145,9 @@ export interface ComfyConfig {
   /** Persistido en SQLite; el servidor puede forzar "true" si CONTENT_FILTER != 0 */
   llm_content_filter?: string;
   llm_filter?: LlmFilterInfo;
-  /** URL del servicio xDiT para generación de vídeo directa (ej: http://192.168.7.101:6000) */
+  /** URL del servicio xDiT T2V (ej: http://192.168.7.101:6000) */
   xdit_url?: string;
+  /** URL del servicio xDiT I2V (ej: http://192.168.7.101:6001) */
 }
 
 export interface ConnectionTestResult {
