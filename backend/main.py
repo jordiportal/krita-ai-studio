@@ -2041,6 +2041,33 @@ async def reload_architectures():
 
 # ─── LoRA Search ──────────────────────────────────────────────────────────────
 
+async def _get_xdit_loras(xdit_url: str) -> List[str]:
+    """Fetch available LoRA names from xDiT service."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{xdit_url}/loras")
+            if resp.status_code == 200:
+                return [l["name"] for l in resp.json().get("loras", [])]
+    except Exception as e:
+        print(f"[xDiT] Error fetching LoRA list: {e}")
+    return []
+
+
+def _resolve_xdit_lora(lora_name: str, available: List[str]) -> Optional[str]:
+    """Resolve a LoRA tag name against xDiT available list (case-insensitive)."""
+    for name in available:
+        if name == lora_name:
+            return name
+    name_lower = lora_name.lower()
+    for name in available:
+        if name.lower() == name_lower:
+            return name
+    for name in available:
+        if name_lower in name.lower() or name.lower() in name_lower:
+            return name
+    return None
+
+
 async def _search_civitai_lora(name: str, limit: int = 5) -> List[Dict[str, Any]]:
     """Busca LoRAs en CivitAI por nombre y retorna candidatos simplificados."""
     try:
@@ -2163,6 +2190,142 @@ async def lora_download_status(download_id: str):
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
+
+# ─── xDiT LoRA Management ─────────────────────────────────────────────────────
+
+@app.get("/api/xdit/loras")
+async def xdit_loras_list():
+    """List LoRAs available on the xDiT service."""
+    xdit_url = get_xdit_url()
+    if not xdit_url:
+        return {"loras": [], "status": "not_configured"}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{xdit_url}/loras")
+            if resp.status_code == 200:
+                return resp.json()
+    except Exception as e:
+        return {"loras": [], "error": str(e)}
+    return {"loras": []}
+
+
+class XditLoraDownloadRequest(BaseModel):
+    civitai_model_id: int
+    civitai_version_id: int
+    name: str
+    filename: str
+    download_url: str
+    size_bytes: float = 0
+
+
+_xdit_lora_downloads: Dict[str, Dict[str, Any]] = {}
+
+
+@app.post("/api/lora/download-xdit")
+async def download_lora_xdit(req: XditLoraDownloadRequest):
+    """Download a LoRA from CivitAI and upload it to the xDiT service."""
+    xdit_url = get_xdit_url()
+    if not xdit_url:
+        raise HTTPException(status_code=400, detail="xDiT no configurado")
+
+    download_id = f"xdit-lora-{uuid.uuid4().hex[:8]}"
+    _xdit_lora_downloads[download_id] = {
+        "status": "downloading",
+        "progress": 0,
+        "filename": req.filename,
+        "error": None,
+    }
+
+    asyncio.create_task(_xdit_lora_download_task(download_id, xdit_url, req))
+    return {"status": "downloading", "download_id": download_id}
+
+
+async def _xdit_lora_download_task(download_id: str, xdit_url: str, req: XditLoraDownloadRequest):
+    """Background task: download from CivitAI, then upload to xDiT."""
+    try:
+        civitai_key = ""
+        try:
+            conn = sqlite3.connect(str(DB_PATH))
+            row = conn.execute(
+                "SELECT value FROM config WHERE key='civitai_api_key'"
+            ).fetchone()
+            if row and row[0]:
+                civitai_key = row[0]
+            conn.close()
+        except Exception:
+            pass
+
+        download_url = req.download_url
+        if civitai_key and "?" in download_url:
+            download_url += f"&token={civitai_key}"
+        elif civitai_key:
+            download_url += f"?token={civitai_key}"
+
+        print(f"[xDiT-LoRA] Downloading {req.filename} from CivitAI...")
+        async with httpx.AsyncClient(timeout=600.0, follow_redirects=True) as client:
+            resp = await client.get(download_url)
+            if resp.status_code != 200:
+                _xdit_lora_downloads[download_id]["status"] = "error"
+                _xdit_lora_downloads[download_id]["error"] = f"CivitAI returned {resp.status_code}"
+                return
+
+            file_bytes = resp.content
+            _xdit_lora_downloads[download_id]["progress"] = 50
+
+        print(f"[xDiT-LoRA] Uploading {req.filename} to xDiT ({len(file_bytes) / 1024 / 1024:.1f} MB)...")
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            files = {"file": (req.filename, file_bytes, "application/octet-stream")}
+            resp = await client.post(f"{xdit_url}/loras/upload", files=files)
+            if resp.status_code == 200:
+                _xdit_lora_downloads[download_id]["status"] = "completed"
+                _xdit_lora_downloads[download_id]["progress"] = 100
+                print(f"[xDiT-LoRA] {req.filename} uploaded successfully.")
+            else:
+                _xdit_lora_downloads[download_id]["status"] = "error"
+                _xdit_lora_downloads[download_id]["error"] = f"xDiT upload failed: {resp.text}"
+
+    except Exception as e:
+        _xdit_lora_downloads[download_id]["status"] = "error"
+        _xdit_lora_downloads[download_id]["error"] = str(e)
+        print(f"[xDiT-LoRA] Error: {e}")
+
+
+@app.get("/api/lora/download-xdit-status/{download_id}")
+async def xdit_lora_download_status(download_id: str):
+    """Check status of an xDiT LoRA download."""
+    if download_id in _xdit_lora_downloads:
+        dl = _xdit_lora_downloads[download_id]
+        result = {
+            "status": dl["status"],
+            "progress": dl["progress"],
+            "filename": dl["filename"],
+            "error": dl.get("error"),
+        }
+        if dl["status"] in ("completed", "error"):
+            del _xdit_lora_downloads[download_id]
+        return result
+    return {"status": "not_found"}
+
+
+@app.delete("/api/xdit/loras/{name}")
+async def xdit_lora_delete(name: str):
+    """Delete a LoRA from the xDiT service."""
+    xdit_url = get_xdit_url()
+    if not xdit_url:
+        raise HTTPException(status_code=400, detail="xDiT no configurado")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.delete(f"{xdit_url}/loras/{name}")
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── Video Models ─────────────────────────────────────────────────────────────
 
 @app.get("/api/video-models")
 async def get_video_models():
@@ -2767,7 +2930,39 @@ async def txt2video_xdit(http_request: Request, body: GenerationVideoRequest):
             actual_seed = random.randint(0, 2**31 - 1)
 
         cfg = get_comfyui_config()
-        prompt_text = body.prompt
+
+        # Parse LoRA tags from prompt
+        clean_prompt, lora_tags = parse_lora_tags(body.prompt)
+        loras_payload = []
+        if lora_tags:
+            available_xdit_loras = await _get_xdit_loras(xdit_url)
+            resolved_loras = []
+            missing_loras = []
+            for name, strength_model, _strength_clip in lora_tags:
+                found = _resolve_xdit_lora(name, available_xdit_loras)
+                if found:
+                    resolved_loras.append({"name": found, "weight": strength_model})
+                else:
+                    missing_loras.append((name, strength_model, _strength_clip))
+
+            if missing_loras:
+                candidates_list = []
+                for lora_name, sm, sc in missing_loras:
+                    candidates = await _search_civitai_lora(lora_name)
+                    candidates_list.append(MissingLoraResult(
+                        lora_tag=lora_name,
+                        strength_model=sm,
+                        strength_clip=sc,
+                        candidates=candidates,
+                    ))
+                return GenerationResponse(
+                    job_id="",
+                    status="missing_loras",
+                    missing_loras=candidates_list,
+                )
+            loras_payload = resolved_loras
+
+        prompt_text = clean_prompt if lora_tags else body.prompt
         prompt_text = await _maybe_apply_llm_prompt_filter(cfg, prompt_text)
 
         job_id = f"xdit-{uuid.uuid4().hex[:12]}"
@@ -2797,6 +2992,8 @@ async def txt2video_xdit(http_request: Request, body: GenerationVideoRequest):
             "guidance_scale": body.cfg_scale if body.cfg_scale > 0 else 3.5,
             "seed": actual_seed,
         }
+        if loras_payload:
+            payload["loras"] = loras_payload
 
         meta = {
             "prompt": prompt_text,
@@ -2809,6 +3006,7 @@ async def txt2video_xdit(http_request: Request, body: GenerationVideoRequest):
             "steps": body.steps or 20,
             "cfg": body.cfg_scale,
             "owner_user_id": owner_uid,
+            "loras": [l["name"] for l in loras_payload] if loras_payload else None,
         }
 
         _xdit_jobs[job_id] = {
@@ -2819,7 +3017,8 @@ async def txt2video_xdit(http_request: Request, body: GenerationVideoRequest):
 
         asyncio.create_task(_xdit_generate_task(job_id, xdit_url, payload, meta))
 
-        print(f"[xDiT] Job {job_id} queued: {body.width}x{body.height}, {body.length} frames, {body.steps} steps")
+        lora_info = f", loras={[l['name'] for l in loras_payload]}" if loras_payload else ""
+        print(f"[xDiT] Job {job_id} queued: {req_w}x{req_h}, {body.length} frames, {body.steps} steps{lora_info}")
         return GenerationResponse(job_id=job_id, status="queued")
 
     except HTTPException:
@@ -2881,7 +3080,40 @@ async def img2video_xdit(http_request: Request, body: Img2VideoXditRequest):
         actual_seed = random.randint(0, 2**31 - 1)
 
     cfg = get_comfyui_config()
-    prompt_text = body.prompt or src.get("prompt", "")
+    raw_prompt = body.prompt or src.get("prompt", "")
+
+    # Parse LoRA tags from prompt
+    clean_prompt, lora_tags = parse_lora_tags(raw_prompt)
+    loras_payload = []
+    if lora_tags:
+        available_xdit_loras = await _get_xdit_loras(xdit_url)
+        resolved_loras = []
+        missing_loras = []
+        for name, strength_model, _strength_clip in lora_tags:
+            found = _resolve_xdit_lora(name, available_xdit_loras)
+            if found:
+                resolved_loras.append({"name": found, "weight": strength_model})
+            else:
+                missing_loras.append((name, strength_model, _strength_clip))
+
+        if missing_loras:
+            candidates_list = []
+            for lora_name, sm, sc in missing_loras:
+                candidates = await _search_civitai_lora(lora_name)
+                candidates_list.append(MissingLoraResult(
+                    lora_tag=lora_name,
+                    strength_model=sm,
+                    strength_clip=sc,
+                    candidates=candidates,
+                ))
+            return GenerationResponse(
+                job_id="",
+                status="missing_loras",
+                missing_loras=candidates_list,
+            )
+        loras_payload = resolved_loras
+
+    prompt_text = clean_prompt if lora_tags else raw_prompt
     prompt_text = await _maybe_apply_llm_prompt_filter(cfg, prompt_text)
 
     job_id = f"xdit-{uuid.uuid4().hex[:12]}"
@@ -2898,6 +3130,8 @@ async def img2video_xdit(http_request: Request, body: Img2VideoXditRequest):
         "guidance_scale": body.cfg_scale if body.cfg_scale > 0 else 3.5,
         "seed": actual_seed,
     }
+    if loras_payload:
+        payload["loras"] = loras_payload
 
     meta = {
         "prompt": prompt_text,
@@ -2911,12 +3145,14 @@ async def img2video_xdit(http_request: Request, body: Img2VideoXditRequest):
         "cfg": body.cfg_scale,
         "checkpoint": "xDiT I2V (Wan2.2-I2V-A14B)",
         "owner_user_id": owner_uid,
+        "loras": [l["name"] for l in loras_payload] if loras_payload else None,
     }
 
     _xdit_jobs[job_id] = {"status": "queued", "progress": 0, "is_video": True}
     asyncio.create_task(_xdit_generate_task(job_id, xdit_url, payload, meta))
 
-    print(f"[xDiT-I2V] Job {job_id} queued from gallery:{body.gallery_id}, {body.length} frames, {body.steps} steps")
+    lora_info = f", loras={[l['name'] for l in loras_payload]}" if loras_payload else ""
+    print(f"[xDiT-I2V] Job {job_id} queued from gallery:{body.gallery_id}, {body.length} frames, {body.steps} steps{lora_info}")
     return GenerationResponse(job_id=job_id, status="queued")
 
 

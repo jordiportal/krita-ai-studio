@@ -181,6 +181,22 @@ export class GenerationService {
     return this.http.get(`${this.apiUrl}/lora/download-status/${encodeURIComponent(downloadId)}`);
   }
 
+  downloadLoraXdit(data: any): Observable<any> {
+    return this.http.post(`${this.apiUrl}/lora/download-xdit`, data);
+  }
+
+  getLoraDownloadXditStatus(downloadId: string): Observable<any> {
+    return this.http.get(`${this.apiUrl}/lora/download-xdit-status/${encodeURIComponent(downloadId)}`);
+  }
+
+  getXditLoras(): Observable<any> {
+    return this.http.get(`${this.apiUrl}/xdit/loras`);
+  }
+
+  deleteXditLora(name: string): Observable<any> {
+    return this.http.delete(`${this.apiUrl}/xdit/loras/${encodeURIComponent(name)}`);
+  }
+
   getInventory(): Observable<InventoryResponse> {
     return this.http.get<InventoryResponse>(`${this.apiUrl}/inventory`);
   }

@@ -186,7 +186,19 @@ import {
             </select>
           </div>
 
-          <div class="input-group" *ngIf="generationMode === 'video'">
+          <!-- I2V Source Image indicator -->
+          <div class="input-group i2v-source-group" *ngIf="generationMode === 'video' && i2vSourceImage">
+            <label>Imagen fuente (I2V)</label>
+            <div class="i2v-source-preview">
+              <img [src]="i2vSourceImage.url" class="i2v-thumb" alt="I2V source">
+              <div class="i2v-source-info">
+                <span class="i2v-label">Modo Image-to-Video activo</span>
+                <button class="btn btn-sm btn-secondary" (click)="clearI2vSource()">&#10005; Quitar imagen</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="input-group" *ngIf="generationMode === 'video' && !i2vSourceImage">
             <label>Resoluci&oacute;n</label>
             <div class="resolution-presets">
               <button class="preset-btn" [class.active]="videoResolutionPreset === '832x480'"
@@ -230,7 +242,7 @@ import {
             (click)="handleGenerate()"
             [disabled]="generating || (!comfyOnline && selectedVideoModel !== '__xdit__')">
             <span *ngIf="generating" class="spinner"></span>
-            <span>{{ generating ? ('Generando... ' + (generationProgress > 0 ? generationProgress + '%' : '')) : (generationMode === 'video' ? 'Generar Video' : 'Generar Imagen') }}</span>
+            <span>{{ generating ? ('Generando... ' + (generationProgress > 0 ? generationProgress + '%' : '')) : (generationMode === 'video' ? (i2vSourceImage ? 'Generar Video (I2V)' : 'Generar Video') : 'Generar Imagen') }}</span>
           </button>
           <div class="progress-bar-container" *ngIf="generating && generationProgress > 0">
             <div class="progress-bar-fill" [style.width.%]="generationProgress"></div>
@@ -1397,6 +1409,16 @@ import {
       cursor: pointer; font-family: inherit;
     }
     .header-logout-btn:hover { color: var(--text-primary); border-color: var(--text-secondary); }
+    .i2v-source-group { margin-bottom: 4px; }
+    .i2v-source-preview {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px; border-radius: 10px;
+      background: var(--bg-input); border: 1px solid var(--accent, #6366f1);
+    }
+    .i2v-thumb { width: 80px; height: 60px; object-fit: cover; border-radius: 6px; flex-shrink: 0; }
+    .i2v-source-info { display: flex; flex-direction: column; gap: 6px; }
+    .i2v-label { font-size: 13px; font-weight: 500; color: var(--accent, #6366f1); }
+    .btn-sm { padding: 4px 10px; font-size: 12px; }
   `]
 })
 export class AppComponent implements OnInit, OnDestroy {
@@ -1520,6 +1542,8 @@ export class AppComponent implements OnInit, OnDestroy {
   /** Coincide con un preset si width/height son exactamente 832x480, etc. */
   imageResolutionPreset = '';
   generationProgress = 0;
+  /** Source image for I2V mode (gallery item) */
+  i2vSourceImage: { id: string; url: string; prompt?: string; neg_prompt?: string } | null = null;
 
   configHost = '';
   configPort = '8188';
@@ -1570,6 +1594,7 @@ export class AppComponent implements OnInit, OnDestroy {
   missingLoraSelections: Record<string, MissingLoraCandidate | null> = {};
   missingLoraDownloading = false;
   missingLoraProgress: Record<string, { status: string; progress: number }> = {};
+  missingLoraSource: 'comfy' | 'comfy-video' | 'xdit-video' = 'comfy';
 
   private sessionSub?: Subscription;
   private healthInterval?: ReturnType<typeof setInterval>;
@@ -1940,6 +1965,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.generationMode = mode;
     if (mode === 'image') {
       this.syncImageResolutionPresetFromSize();
+      this.i2vSourceImage = null;
     }
   }
 
@@ -2410,12 +2436,54 @@ export class AppComponent implements OnInit, OnDestroy {
     }
 
     this.generating = true;
+    this.generationMode = 'video';
     this.generationProgress = 0;
     this.generatedImages = [];
     this.generatedVideos = [];
 
     const [w, h] = this.videoResolutionPreset.split('x').map(Number);
+    const useXdit = this.selectedVideoModel === '__xdit__';
 
+    // I2V mode: source image loaded from gallery
+    if (useXdit && this.i2vSourceImage) {
+      const i2vRequest = {
+        gallery_id: this.i2vSourceImage.id,
+        prompt: this.prompt,
+        negative_prompt: this.negativePrompt,
+        length: this.videoLength,
+        fps: this.videoFps,
+        steps: this.steps,
+        cfg_scale: this.cfg,
+        seed: -1,
+      };
+
+      this.generationService.generateImg2VideoXdit(i2vRequest).subscribe({
+        next: (response: any) => {
+          if (response.status === 'missing_loras' && response.missing_loras?.length) {
+            this.generating = false;
+            this.handleMissingLoras(response.missing_loras, 'xdit-video');
+            return;
+          }
+          if (response.job_id) {
+            this.showToast('Generación I2V xDiT iniciada (multi-GPU)', 'success');
+            this.i2vSourceImage = null;
+            this.pollJob(response.job_id);
+          }
+        },
+        error: (err: any) => {
+          this.showToast('Error xDiT I2V: ' + (err.error?.detail || err.message), 'error');
+          this.generating = false;
+        }
+      });
+
+      this.generationService.saveSettings({
+        strength: this.strength,
+        negative_prompt: this.negativePrompt,
+      }).subscribe();
+      return;
+    }
+
+    // T2V modes
     const request: GenerationVideoRequest = {
       prompt: this.prompt,
       negative_prompt: this.negativePrompt,
@@ -2429,11 +2497,14 @@ export class AppComponent implements OnInit, OnDestroy {
       seed: -1,
     };
 
-    const useXdit = this.selectedVideoModel === '__xdit__';
-
     if (useXdit) {
       this.generationService.generateTxt2VideoXdit(request).subscribe({
         next: (response) => {
+          if (response.status === 'missing_loras' && response.missing_loras?.length) {
+            this.generating = false;
+            this.handleMissingLoras(response.missing_loras, 'xdit-video');
+            return;
+          }
           this.showToast('Generación xDiT iniciada (multi-GPU)', 'success');
           this.pollJob(response.job_id);
         },
@@ -2451,7 +2522,7 @@ export class AppComponent implements OnInit, OnDestroy {
         next: (response) => {
           if (response.status === 'missing_loras' && response.missing_loras) {
             this.generating = false;
-            this.handleMissingLoras(response.missing_loras);
+            this.handleMissingLoras(response.missing_loras, 'comfy-video');
             return;
           }
           this.showToast('Generación de video iniciada', 'success');
@@ -2797,11 +2868,12 @@ export class AppComponent implements OnInit, OnDestroy {
 
   // ─── Missing LoRAs Dialog ──────────────────────────────────────────────
 
-  handleMissingLoras(missing: MissingLoraResult[]) {
+  handleMissingLoras(missing: MissingLoraResult[], source: 'comfy' | 'comfy-video' | 'xdit-video' = 'comfy') {
     this.missingLoras = missing;
     this.missingLoraSelections = {};
     this.missingLoraProgress = {};
     this.missingLoraDownloading = false;
+    this.missingLoraSource = source;
 
     for (const ml of missing) {
       this.missingLoraSelections[ml.lora_tag] = ml.candidates.length > 0
@@ -2839,21 +2911,29 @@ export class AppComponent implements OnInit, OnDestroy {
 
     this.missingLoraDownloading = true;
     let completed = 0;
+    const isXdit = this.missingLoraSource === 'xdit-video';
 
     for (const item of toDownload) {
       this.missingLoraProgress[item.tag] = { status: 'starting', progress: 0 };
-      this.generationService.downloadLora({
+
+      const downloadPayload = {
         civitai_model_id: item.candidate.civitai_model_id,
         civitai_version_id: item.candidate.civitai_version_id,
         name: item.candidate.name,
         filename: item.candidate.filename,
         download_url: item.candidate.download_url,
         size_bytes: item.candidate.size_bytes,
-      }).subscribe({
+      };
+
+      const download$ = isXdit
+        ? this.generationService.downloadLoraXdit(downloadPayload)
+        : this.generationService.downloadLora(downloadPayload);
+
+      download$.subscribe({
         next: (resp) => {
           const dlId = resp.download_id;
           if (dlId) {
-            this.pollLoraDownload(item.tag, dlId, () => {
+            this.pollLoraDownload(item.tag, dlId, isXdit, () => {
               completed++;
               if (completed >= toDownload.length) {
                 this.handleAllLorasDownloaded();
@@ -2878,9 +2958,13 @@ export class AppComponent implements OnInit, OnDestroy {
     }
   }
 
-  pollLoraDownload(loraTag: string, downloadId: string, onDone: () => void) {
+  pollLoraDownload(loraTag: string, downloadId: string, isXdit: boolean, onDone: () => void) {
     const interval = setInterval(() => {
-      this.generationService.getLoraDownloadStatus(downloadId).subscribe({
+      const status$ = isXdit
+        ? this.generationService.getLoraDownloadXditStatus(downloadId)
+        : this.generationService.getLoraDownloadStatus(downloadId);
+
+      status$.subscribe({
         next: (resp) => {
           const status = resp.status || 'unknown';
           const progress = resp.progress || 0;
@@ -2901,7 +2985,7 @@ export class AppComponent implements OnInit, OnDestroy {
           onDone();
         },
       });
-    }, 2000);
+    }, 3000);
   }
 
   handleAllLorasDownloaded() {
@@ -2911,12 +2995,17 @@ export class AppComponent implements OnInit, OnDestroy {
 
     if (allOk) {
       this.showToast('LoRAs descargados. Reintentando generación...', 'success');
+      const source = this.missingLoraSource;
       this.missingLorasOpen = false;
       this.missingLoras = [];
       this.missingLoraSelections = {};
       this.missingLoraProgress = {};
       this.missingLoraDownloading = false;
-      setTimeout(() => this.handleGenerateImage(), 1500);
+      if (source === 'xdit-video' || source === 'comfy-video') {
+        setTimeout(() => this.handleGenerateVideo(), 1500);
+      } else {
+        setTimeout(() => this.handleGenerateImage(), 1500);
+      }
     } else {
       this.missingLoraDownloading = false;
       this.showToast('Algunos LoRAs no se pudieron descargar', 'error');
@@ -3140,35 +3229,26 @@ export class AppComponent implements OnInit, OnDestroy {
 
   handleGenerateVideoFromImage(item: any) {
     if (!item?.id || this.generating) return;
-    this.generating = true;
-    this.generationMode = 'video';
-    this.generationProgress = 0;
-    this.imageMetaOpen = false;
 
-    const request = {
-      gallery_id: item.id,
+    const imgUrl = this.generationService.getGalleryImageUrl(item.id);
+    this.i2vSourceImage = {
+      id: item.id,
+      url: imgUrl,
       prompt: item.meta?.prompt || item.prompt || '',
-      negative_prompt: item.meta?.negativePrompt || item.neg_prompt || '',
-      length: this.videoLength,
-      fps: this.videoFps,
-      steps: this.steps,
-      cfg_scale: this.cfg,
-      seed: -1,
+      neg_prompt: item.meta?.negativePrompt || item.neg_prompt || '',
     };
 
-    this.generationService.generateImg2VideoXdit(request).subscribe({
-      next: (res: any) => {
-        if (res.job_id) {
-          this.activeTab = 'generate';
-          this.showToast('Generando vídeo desde imagen...', 'success');
-          this.pollJob(res.job_id);
-        }
-      },
-      error: (err: any) => {
-        this.generating = false;
-        this.showToast(err.error?.detail || 'Error al iniciar I2V', 'error');
-      },
-    });
+    this.prompt = this.i2vSourceImage.prompt || '';
+    this.negativePrompt = this.i2vSourceImage.neg_prompt || '';
+    this.generationMode = 'video';
+    this.selectedVideoModel = '__xdit__';
+    this.imageMetaOpen = false;
+    this.activeTab = 'generate';
+    this.showToast('Imagen cargada para I2V. Edita el prompt y genera.', 'success');
+  }
+
+  clearI2vSource() {
+    this.i2vSourceImage = null;
   }
 
   // ─── Model helpers ─────────────────────────────────────────────────
