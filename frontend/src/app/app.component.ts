@@ -790,7 +790,9 @@ import {
             <div class="model-card" *ngFor="let model of civitaiResults"
                  (click)="handleOpenModelDetail(model)" tabindex="0" role="button">
               <div class="model-card-img">
-                <img *ngIf="getModelThumb(model)" [src]="getModelThumb(model)" [alt]="model.name" loading="lazy">
+                <video *ngIf="isModelThumbVideo(model)" [src]="getModelThumb(model)"
+                       muted loop playsinline autoplay preload="auto"></video>
+                <img *ngIf="!isModelThumbVideo(model) && getModelThumb(model)" [src]="getModelThumb(model)" [alt]="model.name" loading="lazy">
                 <div class="model-type-badge" [style.background]="getTypeColor(model.type)">{{ model.type }}</div>
               </div>
               <div class="model-card-body">
@@ -3022,7 +3024,17 @@ export class AppComponent implements OnInit, OnDestroy {
     if (!versions?.length) return '';
     const images = versions[0]?.images;
     if (!images?.length) return '';
-    return images[0]?.url || '';
+    const first = images[0];
+    if (first?.type === 'video') return first.url || '';
+    return first?.url || '';
+  }
+
+  isModelThumbVideo(model: any): boolean {
+    const versions = model.modelVersions;
+    if (!versions?.length) return false;
+    const images = versions[0]?.images;
+    if (!images?.length) return false;
+    return images[0]?.type === 'video';
   }
 
   getTypeColor(type: string): string {
