@@ -2305,6 +2305,25 @@ body {
   transition: width 0.5s ease;
 }
 
+.progress-details {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-secondary, #888);
+}
+
+.progress-details .step-info {
+  font-family: 'SF Mono', 'Menlo', monospace;
+  opacity: 0.8;
+}
+
+.progress-details .eta-info {
+  font-weight: 500;
+  color: var(--accent);
+}
+
 /* ─── Gallery Video Badges ─────────────────────────────────────────── */
 
 .gallery-badge-row {

@@ -190,7 +190,7 @@ import {
           <div class="input-group i2v-source-group" *ngIf="generationMode === 'video' && i2vSourceImage">
             <label>Imagen fuente (I2V)</label>
             <div class="i2v-source-preview">
-              <img [src]="i2vSourceImage.url" class="i2v-thumb" alt="I2V source">
+              <img [src]="getImageUrl(i2vSourceImage.id)" class="i2v-thumb" alt="I2V source">
               <div class="i2v-source-info">
                 <span class="i2v-label">Modo Image-to-Video activo</span>
                 <button class="btn btn-sm btn-secondary" (click)="clearI2vSource()">&#10005; Quitar imagen</button>
@@ -246,6 +246,10 @@ import {
           </button>
           <div class="progress-bar-container" *ngIf="generating && generationProgress > 0">
             <div class="progress-bar-fill" [style.width.%]="generationProgress"></div>
+          </div>
+          <div class="progress-details" *ngIf="generating && generationStepInfo">
+            <span class="step-info">Step {{ generationStepInfo }}</span>
+            <span class="eta-info" *ngIf="generationEta !== null">~{{ generationEta < 60 ? (generationEta | number:'1.0-0') + 's' : (generationEta / 60 | number:'1.0-1') + 'min' }} restante</span>
           </div>
         </div>
 
@@ -334,10 +338,11 @@ import {
           <h3 class="card-subtitle">Video generado</h3>
           <div class="video-results">
             <div *ngFor="let videoId of generatedVideos; let i = index" class="video-container">
-              <img
+              <video
                 [src]="getImageUrl(videoId)"
                 class="generated-video"
-                alt="Video generado">
+                autoplay muted loop playsinline preload="auto">
+              </video>
               <div class="video-actions">
                 <a [href]="getImageUrl(videoId)" download class="btn btn-secondary btn-small">
                   Descargar video
@@ -1544,6 +1549,8 @@ export class AppComponent implements OnInit, OnDestroy {
   /** Coincide con un preset si width/height son exactamente 832x480, etc. */
   imageResolutionPreset = '';
   generationProgress = 0;
+  generationEta: number | null = null;
+  generationStepInfo = '';
   /** Source image for I2V mode (gallery item) */
   i2vSourceImage: { id: string; url: string; prompt?: string; neg_prompt?: string } | null = null;
 
@@ -2339,6 +2346,8 @@ export class AppComponent implements OnInit, OnDestroy {
   handleGenerateImage() {
     this.generating = true;
     this.generationProgress = 0;
+    this.generationEta = null;
+    this.generationStepInfo = '';
     this.generatedImages = [];
     this.generatedVideos = [];
 
@@ -2389,6 +2398,8 @@ export class AppComponent implements OnInit, OnDestroy {
         clearInterval(interval);
         this.generating = false;
         this.generationProgress = 0;
+        this.generationEta = null;
+        this.generationStepInfo = '';
         this.showToast('Tiempo de espera agotado', 'error');
         return;
       }
@@ -2398,11 +2409,19 @@ export class AppComponent implements OnInit, OnDestroy {
           if (status.progress && status.progress > 0) {
             this.generationProgress = status.progress;
           }
+          if ((status as any).eta_seconds != null) {
+            this.generationEta = (status as any).eta_seconds;
+          }
+          if ((status as any).step_info) {
+            this.generationStepInfo = (status as any).step_info;
+          }
 
           if (status.status === 'completed') {
             clearInterval(interval);
             this.generating = false;
             this.generationProgress = 0;
+            this.generationEta = null;
+            this.generationStepInfo = '';
 
             if (status.is_video) {
               this.generatedVideos = (status as any).gallery_video_ids || status.video_ids || [];
@@ -2423,6 +2442,8 @@ export class AppComponent implements OnInit, OnDestroy {
             clearInterval(interval);
             this.generating = false;
             this.generationProgress = 0;
+            this.generationEta = null;
+            this.generationStepInfo = '';
             this.showToast('Error: ' + (status.error || 'Generaci\u00f3n fallida'), 'error');
           }
         },
@@ -2440,6 +2461,8 @@ export class AppComponent implements OnInit, OnDestroy {
     this.generating = true;
     this.generationMode = 'video';
     this.generationProgress = 0;
+    this.generationEta = null;
+    this.generationStepInfo = '';
     this.generatedImages = [];
     this.generatedVideos = [];
 
@@ -3242,7 +3265,7 @@ export class AppComponent implements OnInit, OnDestroy {
   handleGenerateVideoFromImage(item: any) {
     if (!item?.id || this.generating) return;
 
-    const imgUrl = this.generationService.getGalleryImageUrl(item.id);
+    const imgUrl = this.getImageUrl(item.id);
     this.i2vSourceImage = {
       id: item.id,
       url: imgUrl,

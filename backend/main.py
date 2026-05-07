@@ -2546,6 +2546,10 @@ async def get_job_status(job_id: str):
             "progress": job.get("progress", 0),
             "is_video": True,
         }
+        if job.get("eta_seconds") is not None:
+            result["eta_seconds"] = job["eta_seconds"]
+        if job.get("step_info"):
+            result["step_info"] = job["step_info"]
         if job["status"] == "completed":
             result["gallery_video_ids"] = job.get("gallery_video_ids", [])
             job.setdefault("_read_count", 0)
@@ -2859,16 +2863,40 @@ async def proxy_video(video_id: str):
 _xdit_jobs: Dict[str, Dict[str, Any]] = {}
 
 
+async def _poll_xdit_progress(job_id: str, xdit_url: str):
+    """Poll xDiT /generate/progress and update job progress in real-time."""
+    async with httpx.AsyncClient() as client:
+        while True:
+            await asyncio.sleep(2)
+            try:
+                resp = await client.get(f"{xdit_url}/generate/progress", timeout=3.0)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("generating") and data.get("percent", 0) > 0:
+                        scaled = 5 + int(data["percent"] * 0.9)
+                        _xdit_jobs[job_id]["progress"] = scaled
+                    if data.get("eta_seconds") is not None:
+                        _xdit_jobs[job_id]["eta_seconds"] = data["eta_seconds"]
+                    if data.get("current_step") and data.get("total_steps"):
+                        _xdit_jobs[job_id]["step_info"] = f"{data['current_step']}/{data['total_steps']}"
+            except Exception:
+                pass
+
+
 async def _xdit_generate_task(job_id: str, xdit_url: str, payload: dict, meta: dict):
     """Background task: calls xDiT /generate and stores result."""
+    progress_task = None
     try:
         _xdit_jobs[job_id]["status"] = "processing"
         _xdit_jobs[job_id]["progress"] = 5
-        async with httpx.AsyncClient() as client:
+
+        progress_task = asyncio.create_task(_poll_xdit_progress(job_id, xdit_url))
+
+        xdit_timeout = httpx.Timeout(connect=30.0, read=900.0, write=60.0, pool=30.0)
+        async with httpx.AsyncClient(timeout=xdit_timeout) as client:
             resp = await client.post(
                 f"{xdit_url}/generate",
                 json=payload,
-                timeout=600.0,
             )
             if resp.status_code != 200:
                 _xdit_jobs[job_id]["status"] = "error"
@@ -2915,6 +2943,9 @@ async def _xdit_generate_task(job_id: str, xdit_url: str, payload: dict, meta: d
         traceback.print_exc()
         _xdit_jobs[job_id]["status"] = "error"
         _xdit_jobs[job_id]["error"] = str(e)
+    finally:
+        if progress_task:
+            progress_task.cancel()
 
 
 @app.post("/api/generate/txt2video-xdit", response_model=GenerationResponse)
