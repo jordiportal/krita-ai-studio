@@ -425,6 +425,44 @@ async def civitai_model_detail(model_id: int):
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@router.get("/civitai/resolve")
+async def civitai_resolve_url(url: str = ""):
+    """Resolve a CivitAI URL or numeric ID to a model, returned in search-result format."""
+    import re
+    model_id = None
+    url = url.strip()
+    if url.isdigit():
+        model_id = int(url)
+    else:
+        m = re.search(r"civitai\.com/models/(\d+)", url)
+        if m:
+            model_id = int(m.group(1))
+    if not model_id:
+        raise HTTPException(status_code=400, detail="No se pudo extraer el ID del modelo de la URL proporcionada")
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{CIVITAI_API}/models/{model_id}",
+                headers=_civitai_headers(),
+            )
+            if resp.status_code == 200:
+                model = resp.json()
+                nsfw_level = _get_nsfw_level()
+                if nsfw_level > 0:
+                    filtered = _apply_content_filter([model], nsfw_level)
+                    if not filtered:
+                        return {"items": [model], "metadata": {}, "warning": "Contenido filtrado por política NSFW"}
+                return {"items": [model], "metadata": {"totalItems": 1}}
+            if resp.status_code == 404:
+                raise HTTPException(status_code=404, detail="Modelo no encontrado en CivitAI")
+            raise HTTPException(status_code=resp.status_code, detail="CivitAI error")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
 @router.get("/civitai/version-images/{version_id}")
 async def civitai_version_images(version_id: int, limit: int = 20):
     """Fetch images with full generation metadata for a model version."""

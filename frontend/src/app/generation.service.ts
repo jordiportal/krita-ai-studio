@@ -141,6 +141,10 @@ export class GenerationService {
     return this.http.get(`${this.apiUrl}/civitai/models/${modelId}`);
   }
 
+  resolveCivitaiUrl(url: string): Observable<any> {
+    return this.http.get(`${this.apiUrl}/civitai/resolve?url=${encodeURIComponent(url)}`);
+  }
+
   downloadModel(data: any): Observable<any> {
     return this.http.post(`${this.apiUrl}/civitai/download`, data);
   }

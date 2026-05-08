@@ -68,7 +68,24 @@ import {
     </div>
 
     <!-- APP -->
-    <div class="app-container" [class.has-bottom-nav]="true" *ngIf="appState === 'app'">
+    <div class="app-shell" *ngIf="appState === 'app'">
+      <nav class="sidebar-nav">
+        <div class="sidebar-brand">Krita AI</div>
+        <button class="sidebar-item" [class.active]="activeTab === 'generate'" (click)="handleSwitchTab('generate')">
+          <span class="sidebar-icon">&#9998;</span><span class="sidebar-label">Generar</span>
+        </button>
+        <button class="sidebar-item" [class.active]="activeTab === 'gallery'" (click)="handleSwitchTab('gallery')">
+          <span class="sidebar-icon">&#9871;</span><span class="sidebar-label">Galer&iacute;a</span>
+          <span class="nav-badge sidebar-badge" *ngIf="galleryTotal > 0">{{ galleryTotal }}</span>
+        </button>
+        <button class="sidebar-item" [class.active]="activeTab === 'images'" (click)="handleSwitchTab('images')">
+          <span class="sidebar-icon">&#128444;</span><span class="sidebar-label">Im&aacute;genes</span>
+        </button>
+        <button *ngIf="isAdmin || !isAuthEnabled" class="sidebar-item" [class.active]="activeTab === 'config'" (click)="handleSwitchTab('config')">
+          <span class="sidebar-icon">&#9881;</span><span class="sidebar-label">Ajustes</span>
+        </button>
+      </nav>
+      <div class="app-container has-bottom-nav">
       <header class="header">
         <h1>Krita AI</h1>
         <div class="header-right">
@@ -84,6 +101,8 @@ import {
 
       <!-- ============ GENERATE TAB ============ -->
       <ng-container *ngIf="activeTab === 'generate'">
+        <div class="generate-layout">
+        <div class="generate-form-col">
         <div class="card">
           <div class="input-group">
             <div class="prompt-label-row">
@@ -321,6 +340,8 @@ import {
           </div>
         </div>
 
+        </div><!-- /generate-form-col -->
+        <div class="generate-results-col">
         <!-- Last result - Images -->
         <div class="card" *ngIf="generatedImages.length > 0">
           <div class="last-result">
@@ -351,6 +372,8 @@ import {
             </div>
           </div>
         </div>
+        </div><!-- /generate-results-col -->
+        </div><!-- /generate-layout -->
       </ng-container>
 
       <!-- ============ GALLERY TAB ============ -->
@@ -772,6 +795,16 @@ import {
             <button class="search-btn" (click)="handleCivitaiSearch()" [disabled]="civitaiSearching">
               <span *ngIf="civitaiSearching" class="spinner" style="width:16px;height:16px;"></span>
               <span *ngIf="!civitaiSearching">&#128269;</span>
+            </button>
+          </div>
+
+          <div class="url-resolve-bar">
+            <input class="input-field search-input" type="text" [(ngModel)]="civitaiUrlInput"
+                   placeholder="Pegar URL de CivitAI (ej: https://civitai.com/models/12345)"
+                   (keydown.enter)="handleResolveCivitaiUrl()">
+            <button class="search-btn" (click)="handleResolveCivitaiUrl()" [disabled]="civitaiResolving">
+              <span *ngIf="civitaiResolving" class="spinner" style="width:16px;height:16px;"></span>
+              <span *ngIf="!civitaiResolving">&#128279;</span>
             </button>
           </div>
 
@@ -1361,7 +1394,8 @@ import {
         [class.error]="toastType === 'error'">
         {{ toastMessage }}
       </div>
-    </div>
+    </div><!-- /app-container -->
+    </div><!-- /app-shell -->
   `,
   styles: [`
     .advanced-card { padding-bottom: 8px; }
@@ -1455,6 +1489,8 @@ export class AppComponent implements OnInit, OnDestroy {
   civitaiPage = 1;
   civitaiCursor = '';
   civitaiHasMore = false;
+  civitaiUrlInput = '';
+  civitaiResolving = false;
 
   modelDetailOpen = false;
   modelDetail: any = null;
@@ -2584,6 +2620,31 @@ export class AppComponent implements OnInit, OnDestroy {
   handleCivitaiLoadMore() {
     this.civitaiSearching = true;
     this._doCivitaiSearch(true);
+  }
+
+  handleResolveCivitaiUrl() {
+    const url = this.civitaiUrlInput.trim();
+    if (!url) return;
+    this.civitaiResolving = true;
+    this.generationService.resolveCivitaiUrl(url).subscribe({
+      next: (res: any) => {
+        this.civitaiResolving = false;
+        const items = res.items || [];
+        if (items.length > 0) {
+          this.civitaiResults = items;
+          this.civitaiHasMore = false;
+          this.civitaiSearched = true;
+          this.civitaiUrlInput = '';
+          this.showToast(`Modelo encontrado: ${items[0].name}`, 'success');
+        } else {
+          this.showToast('No se encontró el modelo', 'error');
+        }
+      },
+      error: (err: any) => {
+        this.civitaiResolving = false;
+        this.showToast('Error: ' + (err.error?.detail || 'URL no válida'), 'error');
+      },
+    });
   }
 
   private _doCivitaiSearch(append: boolean) {

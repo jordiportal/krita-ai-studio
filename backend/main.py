@@ -1638,6 +1638,7 @@ async def get_models():
             response = await client.get(
                 f"{comfy_url}/object_info/CheckpointLoaderSimple", timeout=5.0
             )
+            checkpoints = []
             if response.status_code == 200:
                 info = response.json()
                 models = (
@@ -1646,10 +1647,32 @@ async def get_models():
                     .get("required", {})
                     .get("ckpt_name", [[]])[0]
                 )
+                checkpoints = [
+                    {"name": m, "type": "checkpoint"} for m in models
+                    if not arch_mgr.is_hidden_from(m, "image_generation")
+                ]
+
+            diffusion_models = []
+            resp2 = await client.get(
+                f"{comfy_url}/object_info/UNETLoader", timeout=5.0
+            )
+            if resp2.status_code == 200:
+                info2 = resp2.json()
+                unet_names = (
+                    info2.get("UNETLoader", {})
+                    .get("input", {})
+                    .get("required", {})
+                    .get("unet_name", [[]])[0]
+                )
+                diffusion_models = [
+                    {"name": m, "type": "diffusion_model"} for m in unet_names
+                    if not arch_mgr.is_hidden_from(m, "image_generation")
+                ]
+
+            if checkpoints or diffusion_models:
                 return {
-                    "checkpoints": [
-                        {"name": m, "type": "checkpoint"} for m in models
-                    ],
+                    "checkpoints": checkpoints,
+                    "diffusion_models": diffusion_models,
                     "loras": [],
                     "controlnets": [],
                     "via_plugin": False,
@@ -1659,6 +1682,7 @@ async def get_models():
 
     return {
         "checkpoints": [],
+        "diffusion_models": [],
         "loras": [],
         "controlnets": [],
         "via_plugin": False,
@@ -1995,6 +2019,127 @@ async def detect_architecture(filename: str):
     arch_id = arch_mgr.detect(filename)
     config = arch_mgr.resolve(filename)
     return {"filename": filename, "architecture": arch_id, "config": config}
+
+
+@app.get("/api/architectures/check-deps/{filename:path}")
+async def check_model_dependencies(filename: str):
+    """Check if all dependencies (CLIP, VAE) for a model are available in ComfyUI."""
+    arch_mgr = get_arch_manager()
+    config = arch_mgr.resolve(filename)
+    comfy_url = get_comfyui_url()
+    missing = []
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            clip_cfg = config.get("clip", {})
+            clip_mode = clip_cfg.get("mode", "builtin")
+
+            if clip_mode != "builtin":
+                resp = await client.get(f"{comfy_url}/object_info/CLIPLoader")
+                if resp.status_code == 200:
+                    clip_names = (
+                        resp.json().get("CLIPLoader", {})
+                        .get("input", {}).get("required", {})
+                        .get("clip_name", [[]])[0]
+                    )
+                    clip1 = clip_cfg.get("clip1", "")
+                    if clip1 and clip1 not in clip_names:
+                        missing.append({
+                            "type": "text_encoder",
+                            "filename": clip1,
+                            "folder": "text_encoders (o clip)",
+                            "download_url": _get_dep_download_url(clip1),
+                        })
+                    clip2 = clip_cfg.get("clip2", "")
+                    if clip2 and clip2 != clip1 and clip2 not in clip_names:
+                        missing.append({
+                            "type": "text_encoder",
+                            "filename": clip2,
+                            "folder": "text_encoders (o clip)",
+                            "download_url": _get_dep_download_url(clip2),
+                        })
+
+            vae_name = config.get("vae")
+            if vae_name and clip_mode != "builtin":
+                resp = await client.get(f"{comfy_url}/object_info/VAELoader")
+                if resp.status_code == 200:
+                    vae_names = (
+                        resp.json().get("VAELoader", {})
+                        .get("input", {}).get("required", {})
+                        .get("vae_name", [[]])[0]
+                    )
+                    if vae_name not in vae_names:
+                        missing.append({
+                            "type": "vae",
+                            "filename": vae_name,
+                            "folder": "vae",
+                            "download_url": _get_dep_download_url(vae_name),
+                        })
+
+    except Exception as e:
+        return {"filename": filename, "error": str(e), "missing": []}
+
+    return {
+        "filename": filename,
+        "architecture": config.get("_arch_id", "unknown"),
+        "all_deps_ok": len(missing) == 0,
+        "missing": missing,
+    }
+
+
+_DEP_URLS = {
+    "qwen_3_06b_base.safetensors": "https://huggingface.co/circlestone-labs/Anima/resolve/main/split_files/text_encoders/qwen_3_06b_base.safetensors",
+    "qwen_image_vae.safetensors": "https://huggingface.co/circlestone-labs/Anima/resolve/main/split_files/vae/qwen_image_vae.safetensors",
+}
+
+
+def _get_dep_download_url(filename: str) -> str:
+    return _DEP_URLS.get(filename, "")
+
+
+async def _check_arch_deps_fast(comfy_url: str, arch_config: dict) -> list:
+    """Quick check if CLIP/VAE deps exist in ComfyUI. Returns list of missing deps."""
+    missing = []
+    clip_cfg = arch_config.get("clip", {})
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(f"{comfy_url}/object_info/CLIPLoader")
+            clip_names = []
+            if resp.status_code == 200:
+                clip_names = (
+                    resp.json().get("CLIPLoader", {})
+                    .get("input", {}).get("required", {})
+                    .get("clip_name", [[]])[0]
+                )
+            clip1 = clip_cfg.get("clip1", "")
+            if clip1 and clip1 not in clip_names:
+                missing.append({
+                    "type": "text_encoder",
+                    "filename": clip1,
+                    "folder": "text_encoders",
+                    "download_url": _get_dep_download_url(clip1),
+                })
+
+            vae_name = arch_config.get("vae")
+            if vae_name:
+                resp2 = await client.get(f"{comfy_url}/object_info/VAELoader")
+                vae_names = []
+                if resp2.status_code == 200:
+                    vae_names = (
+                        resp2.json().get("VAELoader", {})
+                        .get("input", {}).get("required", {})
+                        .get("vae_name", [[]])[0]
+                    )
+                if vae_name not in vae_names:
+                    missing.append({
+                        "type": "vae",
+                        "filename": vae_name,
+                        "folder": "vae",
+                        "download_url": _get_dep_download_url(vae_name),
+                    })
+    except Exception:
+        pass
+    return missing
 
 
 @app.get("/api/model-overrides")
@@ -2473,6 +2618,18 @@ async def txt2img(http_request: Request, body: GenerationRequest):
             print(f"[txt2img] model={model_name}, arch={arch_id}, loader={arch_config.get('loader')}")
             print(f"[txt2img] size={body.width}x{body.height}, steps={body.steps}, cfg={body.cfg_scale}, sampler={body.sampler}")
 
+            clip_cfg = arch_config.get("clip", {})
+            if clip_cfg.get("mode", "builtin") != "builtin":
+                missing_deps = await _check_arch_deps_fast(comfy_url, arch_config)
+                if missing_deps:
+                    dep_msg = "Faltan componentes para este modelo:\n"
+                    for dep in missing_deps:
+                        dep_msg += f"• {dep['filename']} → carpeta ComfyUI: models/{dep['folder']}"
+                        if dep.get("download_url"):
+                            dep_msg += f"\n  Descargar: {dep['download_url']}"
+                        dep_msg += "\n"
+                    raise HTTPException(status_code=400, detail=dep_msg)
+
             workflow = build_txt2img_workflow(
                 arch_config=arch_config,
                 prompt=prompt_text,
@@ -2892,7 +3049,7 @@ async def _xdit_generate_task(job_id: str, xdit_url: str, payload: dict, meta: d
 
         progress_task = asyncio.create_task(_poll_xdit_progress(job_id, xdit_url))
 
-        xdit_timeout = httpx.Timeout(connect=30.0, read=900.0, write=60.0, pool=30.0)
+        xdit_timeout = httpx.Timeout(connect=30.0, read=1200.0, write=60.0, pool=30.0)
         async with httpx.AsyncClient(timeout=xdit_timeout) as client:
             resp = await client.post(
                 f"{xdit_url}/generate",

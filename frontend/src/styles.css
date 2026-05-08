@@ -36,8 +36,14 @@ body {
 
 @media (min-width: 768px) {
   .app-container {
-    max-width: 600px;
+    max-width: 900px;
     padding: 24px;
+  }
+}
+@media (min-width: 1200px) {
+  .app-container {
+    max-width: 1100px;
+    padding: 24px 32px;
   }
 }
 
@@ -151,6 +157,11 @@ body {
 @media (min-width: 768px) {
   .settings-grid {
     grid-template-columns: repeat(3, 1fr);
+  }
+}
+@media (min-width: 1200px) {
+  .settings-grid {
+    grid-template-columns: repeat(4, 1fr);
   }
 }
 
@@ -448,6 +459,12 @@ body {
 }
 @media (min-width: 500px) {
   .gallery-grid { grid-template-columns: repeat(3, 1fr); }
+}
+@media (min-width: 768px) {
+  .gallery-grid { grid-template-columns: repeat(4, 1fr); }
+}
+@media (min-width: 1200px) {
+  .gallery-grid { grid-template-columns: repeat(5, 1fr); }
 }
 .gallery-thumb {
   position: relative;
@@ -751,7 +768,17 @@ body {
 .search-bar {
   display: flex;
   gap: 8px;
+  margin-bottom: 8px;
+}
+
+.url-resolve-bar {
+  display: flex;
+  gap: 8px;
   margin-bottom: 12px;
+}
+.url-resolve-bar .search-input {
+  flex: 1;
+  font-size: 12px;
 }
 
 .search-input { flex: 1; }
@@ -815,6 +842,12 @@ body {
 
 @media (min-width: 480px) {
   .model-grid { grid-template-columns: repeat(3, 1fr); }
+}
+@media (min-width: 768px) {
+  .model-grid { grid-template-columns: repeat(3, 1fr); gap: 16px; }
+}
+@media (min-width: 1200px) {
+  .model-grid { grid-template-columns: repeat(4, 1fr); }
 }
 
 .model-card {
@@ -1572,6 +1605,12 @@ body {
   .images-grid {
     grid-template-columns: repeat(3, 1fr);
   }
+}
+@media (min-width: 768px) {
+  .images-grid { grid-template-columns: repeat(4, 1fr); }
+}
+@media (min-width: 1200px) {
+  .images-grid { grid-template-columns: repeat(5, 1fr); }
 }
 
 /* Mode Selector */
@@ -2352,4 +2391,120 @@ body {
 .viewer-img[controls] {
   max-height: 80vh;
   border-radius: 8px;
+}
+
+/* ─── Desktop / Tablet Responsive ─────────────────────────────────────────── */
+
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+.sidebar-nav {
+  display: none;
+}
+
+@media (min-width: 1200px) {
+  .sidebar-nav {
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 200px;
+    height: 100vh;
+    background: var(--bg-card);
+    border-right: 1px solid var(--border);
+    padding: 16px 0;
+    z-index: 101;
+    gap: 4px;
+  }
+  .sidebar-brand {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--primary);
+    padding: 8px 20px 20px;
+  }
+  .sidebar-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 20px;
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 14px;
+    cursor: pointer;
+    transition: background 0.2s, color 0.2s;
+    position: relative;
+    text-align: left;
+    width: 100%;
+  }
+  .sidebar-item:hover {
+    background: rgba(99, 102, 241, 0.08);
+    color: var(--text-primary);
+  }
+  .sidebar-item.active {
+    color: var(--primary);
+    background: rgba(99, 102, 241, 0.12);
+    border-right: 3px solid var(--primary);
+  }
+  .sidebar-icon { font-size: 18px; }
+  .sidebar-label { font-weight: 500; }
+  .sidebar-badge {
+    position: absolute;
+    right: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+  }
+
+  .app-shell .app-container {
+    margin-left: 200px;
+    max-width: 1100px;
+    width: calc(100% - 200px);
+  }
+  .app-shell .app-container.has-bottom-nav {
+    padding-bottom: 24px;
+  }
+  .bottom-nav {
+    display: none;
+  }
+  .header h1 {
+    display: none;
+  }
+
+  /* Generate tab 2-column layout */
+  .generate-layout {
+    display: grid;
+    grid-template-columns: 55% 45%;
+    gap: 24px;
+    align-items: start;
+  }
+  .generate-results-col .card {
+    position: sticky;
+    top: 24px;
+  }
+
+  /* Wider overlays on desktop */
+  .model-detail-panel { max-width: 800px; }
+  .image-meta-panel { max-width: 800px; }
+  .ml-dialog { max-width: 600px; }
+}
+
+/* Tablet overlay widths */
+@media (min-width: 768px) and (max-width: 1199px) {
+  .model-detail-panel { max-width: 700px; }
+  .image-meta-panel { max-width: 700px; }
+  .ml-dialog { max-width: 540px; }
+}
+
+/* Gallery grid gap improvements */
+@media (min-width: 768px) {
+  .gallery-grid { gap: 12px; }
+  .images-grid { gap: 12px; }
+}
+@media (min-width: 1200px) {
+  .gallery-grid { gap: 14px; }
+  .images-grid { gap: 14px; }
 }

@@ -188,6 +188,42 @@ def build_txt2img_workflow(
         vae_ref = [checkpoint_id, 2]
         node_id += 1
 
+        clip_mode = clip_cfg.get("mode", "builtin")
+        if clip_mode != "builtin":
+            clip_loader_id = str(node_id)
+            if clip_mode == "single":
+                workflow[clip_loader_id] = {
+                    "_meta": {"title": "CLIP Loader"},
+                    "inputs": {
+                        "clip_name": clip_cfg.get("clip1", ""),
+                        "type": clip_cfg.get("type", "stable_diffusion"),
+                    },
+                    "class_type": "CLIPLoader",
+                }
+            else:
+                workflow[clip_loader_id] = {
+                    "_meta": {"title": "CLIP Loader"},
+                    "inputs": {
+                        "clip_name1": clip_cfg.get("clip1", ""),
+                        "clip_name2": clip_cfg.get("clip2", clip_cfg.get("clip1", "")),
+                        "type": clip_cfg.get("type", "stable_diffusion"),
+                    },
+                    "class_type": "DualCLIPLoader",
+                }
+            clip_ref = [clip_loader_id, 0]
+            node_id += 1
+
+        vae_override = arch_config.get("vae")
+        if vae_override and clip_mode != "builtin":
+            vae_loader_id = str(node_id)
+            workflow[vae_loader_id] = {
+                "_meta": {"title": "VAE Loader"},
+                "inputs": {"vae_name": vae_override},
+                "class_type": "VAELoader",
+            }
+            vae_ref = [vae_loader_id, 0]
+            node_id += 1
+
     # ── LoRA Loaders ──
     if loras:
         for lora_filename, strength_model, strength_clip in loras:

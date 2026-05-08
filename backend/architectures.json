@@ -192,6 +192,34 @@
       "capabilities": ["txt2img", "img2img", "inpainting"],
       "hidden_from": []
     },
+    "anima": {
+      "label": "Anima",
+      "detection": ["anima", "qwen_image"],
+      "exclude": ["vae"],
+      "priority": 11,
+      "loader": "checkpoint",
+      "clip": {
+        "mode": "single",
+        "type": "qwen_image",
+        "clip1": "qwen_3_06b_base.safetensors"
+      },
+      "vae": "qwen_image_vae.safetensors",
+      "latent_node": "EmptySD3LatentImage",
+      "guidance": { "type": "cfg" },
+      "sampling": {
+        "sampler": "er_sde",
+        "scheduler": "normal",
+        "steps": 35,
+        "cfg": 5.0
+      },
+      "prompt": {
+        "style": "masterpiece, best quality, score_7, safe, {prompt}",
+        "negative": "worst quality, low quality, score_1, score_2, score_3"
+      },
+      "rescale_cfg": false,
+      "capabilities": ["txt2img"],
+      "hidden_from": []
+    },
     "sd15": {
       "label": "Stable Diffusion 1.5",
       "detection": [],
